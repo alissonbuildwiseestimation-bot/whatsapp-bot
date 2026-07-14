@@ -1,16 +1,10 @@
 // ==UserScript==
 // @name         DanieWatch Bot Link Grabber
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Adds a floating "Copy Bot Command" button to easily copy download links in the WhatsApp bot format.
 // @author       Danie
-// @include      *://*vegamovies*/*
-// @include      *://*rogmovies*/*
-// @include      *://*hdhub4u*/*
-// @include      *://*vcloud*/*
-// @include      *://*hubcloud*/*
-// @include      *://*vgmlink*/*
-// @include      *://*gdflix*/*
+// @match        *://*/*
 // @grant        GM_setClipboard
 // @grant        GM_addStyle
 // @run-at       document-end
@@ -19,13 +13,26 @@
 (function() {
     'use strict';
 
+    const keywords = [
+        'vegamovies', 'rogmovies', 'hdhub4u', 
+        'vcloud', 'hubcloud', 'vgmlink', 
+        'gdflix', 'nexdrive', 'kmhd', 
+        'heymovies', 'katdrive', 'katdrama'
+    ];
+
+    const host = window.location.hostname.toLowerCase();
+    const isMatched = keywords.some(kw => host.includes(kw));
+    if (!isMatched) return;
+
+    console.log('[DanieWatch Link Grabber] Activated on:', host);
+
     // CSS styling for buttons and notifications
     GM_addStyle(`
         .dw-btn {
             background: linear-gradient(135deg, #10B981, #059669);
             color: white !important;
             border: none;
-            padding: 8px 12px;
+            padding: 8px 14px;
             font-size: 13px;
             font-weight: bold;
             border-radius: 6px;
@@ -85,7 +92,34 @@
         }, 3000);
     }
 
-    // Clean movie title
+    // Copy to clipboard
+    function copyCommand(filename, url) {
+        const cleanName = filename.replace(/\.mp4$/i, '').trim();
+        const command = `.download ${cleanName}.mp4 = ${url}`;
+        GM_setClipboard(command);
+        showToast(`📋 Copied: "${cleanName}.mp4"`);
+    }
+
+    // Clean title from headings
+    function getHeadingTitle(element) {
+        let prev = element.closest('p, div, center');
+        if (prev) {
+            let prevSibling = prev.previousElementSibling;
+            let checks = 0;
+            while (prevSibling && checks < 5) {
+                const text = prevSibling.textContent.trim();
+                // If it contains resolution keywords and year, it is a valid heading title
+                if (text.match(/480p|720p|1080p|2160p|4k/i)) {
+                    return text.replace(/^download\s+/i, '').replace(/\s+/g, ' ').trim();
+                }
+                prevSibling = prevSibling.previousElementSibling;
+                checks++;
+            }
+        }
+        return null;
+    }
+
+    // Fallback: document.title clean up
     function getCleanTitle() {
         let title = document.title || '';
         title = title.replace(/^download\s+/i, '')
@@ -98,43 +132,8 @@
         return title;
     }
 
-    // Copy to clipboard
-    function copyCommand(filename, url) {
-        const command = `.download ${filename} = ${url}`;
-        GM_setClipboard(command);
-        showToast(`📋 Copied: "${filename}"`);
-    }
-
-    // Process pages depending on domain
-    const host = window.location.hostname;
-
-    function detectResolution(element) {
-        let parentText = '';
-        let current = element;
-        for (let i = 0; i < 4; i++) {
-            if (!current) break;
-            parentText += ' ' + current.textContent;
-            let heading = current.querySelector('h1, h2, h3, h4, h5, h6, strong');
-            if (heading) parentText += ' ' + heading.textContent;
-            current = current.parentElement;
-        }
-        
-        let prev = element.closest('p, div, center');
-        if (prev) {
-            let prevSibling = prev.previousElementSibling;
-            let checks = 0;
-            while (prevSibling && checks < 5) {
-                const text = prevSibling.textContent;
-                if (text.match(/480p|720p|1080p|2160p|4k/i)) {
-                    parentText += ' ' + text;
-                    break;
-                }
-                prevSibling = prevSibling.previousElementSibling;
-                checks++;
-            }
-        }
-
-        const combinedText = parentText.toLowerCase();
+    function detectResolution(headingText, element) {
+        const combinedText = ((headingText || '') + ' ' + (element.textContent || '')).toLowerCase();
         if (combinedText.includes('2160p') || combinedText.includes('4k')) return '2160p';
         if (combinedText.includes('1080p')) return '1080p';
         if (combinedText.includes('720p')) return '720p';
@@ -142,6 +141,50 @@
         return '720p';
     }
 
+    // Auto-Bypasser for redirect / landing pages
+    function autoBypassShortener() {
+        // Find links and buttons with redirect keywords
+        const targetSelectors = [
+            'a[href*="vgmlink"]', 'a[href*="gdflix"]', 'a[href*="nexdrive"]', 'a[href*="vcloud"]', 'a[href*="hubcloud"]',
+            'input[type="submit"]', 'button', 'a.btn', '.btn', '#download', '#download-btn'
+        ];
+
+        // 1. Automatically click "Verify", "Double click to generate link", etc.
+        const verifyTexts = [
+            'click to verify', 'double click to generate link', 'click here to continue', 
+            'verify', 'generate link', 'please wait', 'dual tap to go to link'
+        ];
+
+        document.querySelectorAll('a, button, div, span, input').forEach(el => {
+            const txt = el.textContent.trim().toLowerCase() || el.value?.toLowerCase() || '';
+            if (verifyTexts.some(vt => txt.includes(vt))) {
+                // If it is a hidden element or has a timer, show it
+                if (el.style.display === 'none') el.style.display = 'block';
+                if (el.disabled) el.disabled = false;
+                el.click();
+            }
+        });
+
+        // 2. Automatically click "Get Link" or "Go to Link" or "Download Now"
+        const finalLinkTexts = ['get link', 'go to link', 'download now', 'direct download', 'download link'];
+        document.querySelectorAll('a, button, input').forEach(el => {
+            const txt = el.textContent.trim().toLowerCase() || el.value?.toLowerCase() || '';
+            if (finalLinkTexts.some(flt => txt.includes(flt))) {
+                if (el.style.display === 'none') el.style.display = 'block';
+                if (el.disabled) el.disabled = false;
+                el.click();
+            }
+        });
+    }
+
+    // Run bypasser loop if on shortener domain
+    if (host.includes('vgmlink') || host.includes('gdflix') || host.includes('nexdrive') || host.includes('heymovies') || host.includes('kmhd')) {
+        setInterval(autoBypassShortener, 1000);
+    }
+
+    // ----------------------------------------------------
+    //  Injections for Main Pages
+    // ----------------------------------------------------
     if (host.includes('vegamovies') || host.includes('rogmovies') || host.includes('hdhub4u')) {
         const buttons = [];
 
@@ -178,9 +221,11 @@
             }
         });
 
-        // Inject Bot buttons next to actual download links
+        // Inject Bot buttons next to download links
         buttons.forEach(({ link, target }) => {
-            const res = detectResolution(target);
+            const headingTitle = getHeadingTitle(target);
+            const res = detectResolution(headingTitle, target);
+            const displayTitle = headingTitle || `${getCleanTitle()} [${res}]`;
             
             const btn = document.createElement('button');
             btn.className = 'dw-btn';
@@ -189,18 +234,18 @@
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                const cleanTitle = getCleanTitle();
-                let fileSuffix = `[${res}].mp4`;
-                copyCommand(`${cleanTitle} ${fileSuffix}`, link.href);
+                copyCommand(displayTitle, link.href);
             });
 
-            // Insert next to the anchor link or the button itself
             link.parentNode.insertBefore(btn, link.nextSibling);
         });
-    } else if (host.includes('vcloud') || host.includes('hubcloud') || host.includes('gdflix') || host.includes('vgmlink')) {
-        // Redirect/Landing pages or Final V-Cloud page
-        // Find direct download servers
-        const btns = document.querySelectorAll('a.btn, h2 a.btn');
+    }
+
+    // ----------------------------------------------------
+    //  Injections for Cloud Pages
+    // ----------------------------------------------------
+    else if (host.includes('vcloud') || host.includes('hubcloud') || host.includes('gdflix') || host.includes('vgmlink')) {
+        const btns = document.querySelectorAll('a.btn, h2 a.btn, .btn');
         btns.forEach(btn => {
             const text = btn.textContent.toLowerCase();
             const href = btn.href;
