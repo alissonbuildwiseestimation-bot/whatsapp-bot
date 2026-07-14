@@ -4,12 +4,19 @@
 // @version      1.0
 // @description  Adds a floating "Copy Bot Command" button to easily copy download links in the WhatsApp bot format.
 // @author       Danie
+// @match        *://vegamovies.*/*
 // @match        *://*.vegamovies.*/*
+// @match        *://rogmovies.*/*
 // @match        *://*.rogmovies.*/*
+// @match        *://hdhub4u.*/*
 // @match        *://*.hdhub4u.*/*
+// @match        *://vcloud.*/*
 // @match        *://*.vcloud.*/*
+// @match        *://hubcloud.*/*
 // @match        *://*.hubcloud.*/*
+// @match        *://vgmlink.*/*
 // @match        *://*.vgmlink.*/*
+// @match        *://gdflix.*/*
 // @match        *://*.gdflix.*/*
 // @grant        GM_setClipboard
 // @grant        GM_addStyle
