@@ -24,7 +24,7 @@ function loadSettings() {
     } catch (err) {
         console.error('[DanieDownload] Failed to load settings:', err.message);
     }
-    return { mode: 'private', groupJid: '', groupName: '' };
+    return { mode: 'private', groupJid: '', groupName: '', privateJid: '', privateName: '' };
 }
 
 function saveSettings(settings) {
@@ -39,9 +39,46 @@ function saveSettings(settings) {
 }
 
 // =========================================================================
-//  IN-MEMORY STATE for multi-step .config flow
+//  IN-MEMORY STATE & LISTENERS for multi-step plain-text reply config flow
 // =========================================================================
 const pendingConfig = {};
+
+function initUpsertListener(conn) {
+    if (conn.danieDownloadUpsertRegistered) return;
+    conn.danieDownloadUpsertRegistered = true;
+
+    conn.ev.on('messages.upsert', async (chatUpdate) => {
+        try {
+            if (chatUpdate.type !== 'notify') return;
+            const mek = chatUpdate.messages[0];
+            if (!mek || !mek.message) return;
+
+            const from = mek.key.remoteJid;
+            const senderJid = mek.key.participant || mek.key.remoteJid;
+
+            if (!pendingConfig[senderJid]) return;
+
+            const body = mek.message.conversation || 
+                         mek.message.extendedTextMessage?.text || 
+                         mek.message.buttonsResponseMessage?.selectedButtonId || 
+                         mek.message.listResponseMessage?.singleSelectReply?.selectedRowId || 
+                         '';
+            const trimmedText = body.trim();
+            if (!trimmedText) return;
+
+            // If it starts with prefix, let the command registry handle it
+            if (trimmedText.startsWith('.')) return;
+
+            const reply = async (textMsg) => {
+                return conn.sendMessage(from, { text: textMsg }, { quoted: mek });
+            };
+
+            await handleConfigReply(conn, mek, null, senderJid, trimmedText, reply);
+        } catch (err) {
+            console.error('[DanieDownload] Error in messages.upsert config listener:', err);
+        }
+    });
+}
 
 function isOwner(senderJid) {
     const ownerNum = (process.env.BOT_NUMBER || '').trim();
@@ -92,25 +129,30 @@ cmd({
             return reply('❌ Only the bot owner can use this command.');
         }
 
+        initUpsertListener(conn);
+
         const current = loadSettings();
-        const modeLabel = current.mode === 'group'
-            ? `📤 *Group* → ${current.groupName || current.groupJid}`
-            : '📥 *Private Chat*';
+        let modeLabel = '📥 *Private Chat*';
+        if (current.mode === 'group') {
+            modeLabel = `📤 *Group* → ${current.groupName || current.groupJid}`;
+        } else if (current.mode === 'private' && current.privateJid) {
+            modeLabel = `📥 *Private Chat* → ${current.privateName || current.privateJid}`;
+        }
 
         if (q && q.trim()) {
             return handleConfigReply(conn, mek, m, senderJid, q.trim(), reply);
         }
 
-        pendingConfig[senderJid] = { step: 'mode', groups: [] };
+        pendingConfig[senderJid] = { step: 'mode', groups: [], chats: [] };
 
         await reply(
             `⚙️ *DanieWatch Download Config*\n\n` +
             `Current setting: ${modeLabel}\n\n` +
             `Where should downloaded files be sent?\n\n` +
             `*Reply with:*\n` +
-            `  \`1\` — 📥 Private Chat (sent to you)\n` +
-            `  \`2\` — 📤 A WhatsApp Group\n\n` +
-            `_Send \`.config 1\` or \`.config 2\` to choose._`
+            `  \`1\` — 📥 Private Chats\n` +
+            `  \`2\` — 📤 WhatsApp Groups\n\n` +
+            `_Reply with just the number to select._`
         );
     } catch (error) {
         console.error('[DanieDownload] Config error:', error);
@@ -124,10 +166,46 @@ async function handleConfigReply(conn, mek, m, senderJid, text, reply) {
 
     if (step === 'mode') {
         if (text === '1') {
-            const settings = { mode: 'private', groupJid: '', groupName: '' };
-            saveSettings(settings);
-            delete pendingConfig[senderJid];
-            return reply('✅ Download mode set to *Private Chat*.\n\nAll files from `.download` will be sent directly to you.');
+            await reply('🔍 Fetching private chats...');
+            try {
+                let chats = [];
+                if (conn.store && conn.store.chats) {
+                    chats = conn.store.chats.all();
+                } else if (conn.chats) {
+                    chats = Object.values(conn.chats);
+                }
+
+                // Filter private chats (s.whatsapp.net, c.us, lid)
+                let privateChats = chats.filter(c => c.id && (c.id.endsWith('@s.whatsapp.net') || c.id.endsWith('@c.us') || c.id.endsWith('@lid')));
+
+                const seenJids = new Set();
+                privateChats = privateChats.filter(c => {
+                    if (seenJids.has(c.id)) return false;
+                    seenJids.add(c.id);
+                    return true;
+                });
+
+                // Always include oneself first
+                const selfChat = { id: senderJid, name: 'You (Private Chat)' };
+                privateChats = [selfChat, ...privateChats.filter(c => c.id !== senderJid)];
+
+                // Limit top 15
+                privateChats = privateChats.slice(0, 15);
+
+                pendingConfig[senderJid] = { step: 'private_chat', chats: privateChats };
+
+                let list = '📋 *Select a Private Chat:*\n\n';
+                privateChats.forEach((c, i) => {
+                    const name = c.name || c.subject || c.verifiedName || c.notify || c.id.split('@')[0];
+                    list += `  \`${i + 1}\` — ${name}\n`;
+                });
+                list += `\n_Reply with just the number to choose._`;
+
+                return reply(list);
+            } catch (err) {
+                delete pendingConfig[senderJid];
+                return reply(`❌ Failed to fetch private chats: ${err.message}`);
+            }
         }
 
         if (text === '2') {
@@ -146,11 +224,11 @@ async function handleConfigReply(conn, mek, m, senderJid, text, reply) {
 
                 pendingConfig[senderJid] = { step: 'group', groups };
 
-                let list = '📋 *Your Groups:*\n\n';
+                let list = '📋 *Select a WhatsApp Group:*\n\n';
                 groups.forEach((g, i) => {
                     list += `  \`${i + 1}\` — ${g.subject}\n`;
                 });
-                list += `\n_Reply with the group number, e.g. \`.config 3\`_`;
+                list += `\n_Reply with just the number to choose._`;
 
                 return reply(list);
             } catch (err) {
@@ -158,7 +236,23 @@ async function handleConfigReply(conn, mek, m, senderJid, text, reply) {
                 return reply(`❌ Failed to fetch groups: ${err.message}`);
             }
         }
-        return reply('❌ Invalid option. Reply with `1` (Private) or `2` (Group).');
+        return reply('❌ Invalid option. Reply with `1` (Private Chats) or `2` (WhatsApp Groups).');
+    }
+
+    if (step === 'private_chat') {
+        const num = parseInt(text, 10);
+        const chats = state.chats || [];
+
+        if (isNaN(num) || num < 1 || num > chats.length) {
+            return reply(`❌ Invalid selection. Reply with a number from 1 to ${chats.length}.`);
+        }
+
+        const chosen = chats[num - 1];
+        const chosenName = chosen.name || chosen.id.split('@')[0];
+        const settings = { mode: 'private', privateJid: chosen.id, privateName: chosenName, groupJid: '', groupName: '' };
+        saveSettings(settings);
+        delete pendingConfig[senderJid];
+        return reply(`✅ Download destination set to Private Chat:\n👤 Name: *${chosenName}*\n🆔 \`${chosen.id}\``);
     }
 
     if (step === 'group') {
@@ -170,10 +264,10 @@ async function handleConfigReply(conn, mek, m, senderJid, text, reply) {
         }
 
         const chosen = groups[num - 1];
-        const settings = { mode: 'group', groupJid: chosen.jid, groupName: chosen.subject };
+        const settings = { mode: 'group', groupJid: chosen.jid, groupName: chosen.subject, privateJid: '', privateName: '' };
         saveSettings(settings);
         delete pendingConfig[senderJid];
-        return reply(`✅ Download mode set to *Group*.\n\n📤 Files will be sent to: *${chosen.subject}*\n🆔 \`${chosen.jid}\``);
+        return reply(`✅ Download destination set to Group:\n📤 Name: *${chosen.subject}*\n🆔 \`${chosen.jid}\``);
     }
 }
 
@@ -270,8 +364,9 @@ cmd({
 
         const settings = loadSettings();
         const isGroupMode = settings.mode === 'group' && settings.groupJid;
-        const destJid = isGroupMode ? settings.groupJid : from;
-        const destLabel = isGroupMode ? `📤 Group: *${settings.groupName}*` : '📥 *Private Chat*';
+        const senderJid = m.sender || mek.sender || from;
+        const destJid = isGroupMode ? settings.groupJid : (settings.privateJid || senderJid);
+        const destLabel = isGroupMode ? `📤 Group: *${settings.groupName}*` : `📥 Private Chat: *${settings.privateName || 'You'}*`;
 
         for (let i = 0; i < items.length; i++) {
             let { customFilename, url } = parseDownloadItem(items[i]);
@@ -285,56 +380,11 @@ cmd({
             const isMoviePage = ['vegamovies', 'rogmovies', 'hdhub4u'].some(domain => url.toLowerCase().includes(domain));
             if (isMoviePage) {
                 try {
-                    await reply(`🔍 Processing movie/series page link...\n🔗 ${url}`);
+                    await reply(`🔍 Resolving movie/series download link from page...\n🔗 ${url}`);
                     
                     // Scrape the detail page
                     const scraped = await scrapePostPage(url);
                     console.log('[DanieDownload] Scraped details:', scraped);
-                    
-                    // Fetch TMDB metadata
-                    const tmdb = await fetchTmdbMetadata(scraped.title, scraped.season ? 'tv' : 'movie', scraped.imdbId);
-                    
-                    const titleText = tmdb ? tmdb.title : scraped.title;
-                    const yearText = tmdb ? tmdb.year : scraped.year || 'N/A';
-                    const genresText = tmdb ? tmdb.genres : 'Unknown';
-                    const overviewText = tmdb ? tmdb.overview : '— No summary available —';
-                    
-                    // Format message details caption
-                    let seasonText = '';
-                    let episodeText = '';
-                    if (scraped.season !== null) {
-                        const sLabel = `S${String(scraped.season).padStart(2, '0')}`;
-                        seasonText = `📺 *Season:* *${sLabel}*\n`;
-                        if (scraped.episode !== null) {
-                            const eLabel = `E${String(scraped.episode).padStart(2, '0')}`;
-                            episodeText = `🔢 *Episodes:* *${eLabel}*\n`;
-                        } else {
-                            episodeText = `🔢 *Episodes:* *All/Pack*\n`;
-                        }
-                    }
-
-                    let detailsMessage = `🎬 *『 𝑫𝑨𝑵𝑰𝑬𝑾𝑨𝑻𝑪𝑯 』* 🍿\n`;
-                    detailsMessage += `───────────────────\n`;
-                    detailsMessage += `📝 *Title:* *${titleText}*\n`;
-                    detailsMessage += `📅 *Year:* *${yearText}*\n`;
-                    if (seasonText) detailsMessage += seasonText;
-                    detailsMessage += `🎭 *Genre:* *${genresText}*\n`;
-                    if (episodeText) detailsMessage += episodeText;
-                    detailsMessage += `───────────────────\n`;
-                    detailsMessage += `*『 𝑫𝑨𝑵𝑰𝑬𝑾𝑨𝑻𝑪𝑯 』*`;
-                    
-                    // Send TMDB poster and movie details first to the configured chat destination
-                    const posterUrl = tmdb && tmdb.posterUrl ? tmdb.posterUrl : null;
-                    if (posterUrl) {
-                        await conn.sendMessage(destJid, {
-                            image: { url: posterUrl },
-                            caption: detailsMessage
-                        });
-                    } else {
-                        await conn.sendMessage(destJid, {
-                            text: detailsMessage
-                        });
-                    }
                     
                     // Follow landing redirects to find V-Cloud/HubCloud
                     const landingUrl = await resolveLandingLink(scraped.chosenUrl);
@@ -344,14 +394,7 @@ cmd({
                         directUrl = await resolveVcloudLink(landingUrl);
                     }
                     
-                    let ext = 'mp4';
-                    try {
-                        const urlPath = new URL(directUrl).pathname;
-                        const urlFile = urlPath.substring(urlPath.lastIndexOf('/') + 1);
-                        if (urlFile.includes('.')) ext = urlFile.split('.').pop();
-                    } catch (e) {}
-                    
-                    let displayFilename = `${titleText} (${yearText})`;
+                    let displayFilename = `${scraped.title} (${scraped.year || 'N/A'})`;
                     if (scraped.season !== null) {
                         displayFilename += ` S${String(scraped.season).padStart(2, '0')}`;
                         if (scraped.episode !== null) {
@@ -469,10 +512,10 @@ cmd({
                 document: { url: tempFilePath },
                 mimetype: mime,
                 fileName: finalFileName
-            }, isGroupMode ? {} : { quoted: mek });
+            }, destJid === from ? { quoted: mek } : {});
 
-            if (isGroupMode && destJid !== from) {
-                await reply(`✅ *${cleanDisplayFilename}* (${sizeInMB} MB) successfully sent to the group!`);
+            if (destJid !== from) {
+                await reply(`✅ *${cleanDisplayFilename}* (${sizeInMB} MB) successfully sent to the configured destination!`);
             }
 
             // Delete temporary file
@@ -538,10 +581,11 @@ cmd({
 
         const settings = loadSettings();
         const isGroupMode = settings.mode === 'group' && settings.groupJid;
-        const destJid = isGroupMode ? settings.groupJid : from;
-        const destLabel = isGroupMode ? `📤 Group: *${settings.groupName}*` : '📥 *Private Chat*';
+        const senderJid = m.sender || mek.sender || from;
+        const destJid = isGroupMode ? settings.groupJid : (settings.privateJid || senderJid);
+        const destLabel = isGroupMode ? `📤 Group: *${settings.groupName}*` : `📥 Private Chat: *${settings.privateName || 'You'}*`;
 
-        // 1. Format details message
+        // 1. Format details message (remove top/bottom branding, append daniewatch)
         let seasonText = '';
         let episodeText = '';
         if (mediaType === 'tv') {
@@ -581,17 +625,14 @@ cmd({
             }
         }
 
-        let detailsMessage = `🎬 *『 𝑫𝑨𝑵𝑰𝑬𝑾𝑨𝑻𝑪𝑯 』* 🍿\n`;
-        detailsMessage += `───────────────────\n`;
-        detailsMessage += `📝 *Title:* *${tmdb.title}*\n`;
+        let detailsMessage = `📝 *Title:* *${tmdb.title}*\n`;
         detailsMessage += `📅 *Year:* *${tmdb.year}*\n`;
         if (seasonText) detailsMessage += seasonText;
         detailsMessage += `🎭 *Genre:* *${tmdb.genres}*\n`;
         if (episodeText) detailsMessage += episodeText;
-        detailsMessage += `───────────────────\n`;
-        detailsMessage += `*『 𝑫𝑨𝑵𝑰𝑬𝑾𝑨𝑻𝑪𝑯 』*`;
+        detailsMessage += `\ndaniewatch`;
 
-        // 2. Download and send poster image first
+        // 2. Download and send poster image first to configured destJid
         const posterUrl = tmdb.posterUrl;
         let posterSent = false;
         if (posterUrl) {
@@ -622,7 +663,7 @@ cmd({
                     await conn.sendMessage(destJid, {
                         image: { url: tempPosterPath },
                         caption: detailsMessage
-                    });
+                    }, destJid === from ? { quoted: mek } : {});
                     posterSent = true;
                     fs.unlinkSync(tempPosterPath);
                 }
@@ -637,155 +678,10 @@ cmd({
         if (!posterSent) {
             await conn.sendMessage(destJid, {
                 text: detailsMessage
-            });
+            }, destJid === from ? { quoted: mek } : {});
         }
 
-        // 3. Process download files in sequence
-        for (let i = 0; i < items.length; i++) {
-            let { customFilename, url } = parseDownloadItem(items[i]);
-            
-            // If this is the first item and the customFilename was the TMDB URL, we determine a default name
-            let targetFilename = customFilename;
-            if (i === 0 && customFilename && /themoviedb\.org\/(movie|tv)\/(\d+)/i.test(customFilename)) {
-                // Fetch resolution if in the URL
-                let resMatch = url.match(/\b(480p|720p|1080p|2160p|4k)\b/i);
-                let resolution = resMatch ? ` [${resMatch[1]}]` : '';
-                targetFilename = `${tmdb.title} (${tmdb.year})${resolution}`;
-            }
-
-            // If no customFilename at all (e.g. for item 2 onwards), try to get clean filename or use movie title
-            if (!targetFilename) {
-                try {
-                    const urlPath = new URL(url).pathname;
-                    const urlFile = urlPath.substring(urlPath.lastIndexOf('/') + 1);
-                    if (urlFile && urlFile.includes('.')) {
-                        targetFilename = decodeURIComponent(urlFile);
-                    }
-                } catch (err) {}
-                if (!targetFilename) {
-                    let resMatch = url.match(/\b(480p|720p|1080p|2160p|4k)\b/i);
-                    let resolution = resMatch ? ` [${resMatch[1]}]` : '';
-                    targetFilename = `${tmdb.title} (${tmdb.year})${resolution}`;
-                }
-            }
-
-            // Strip format extension from targetFilename for WhatsApp display
-            const displayFilename = cleanFileName(targetFilename);
-
-            await reply(`⏳ Processing file *${i + 1}/${items.length}*...\n📍 Name: *${displayFilename}*`);
-
-            // Let's resolve redirects / landing pages (in case they paste shorteners)
-            let directUrl = url;
-            const isScraperLink = ['vegamovies', 'rogmovies', 'hdhub4u'].some(domain => url.toLowerCase().includes(domain));
-            if (isScraperLink) {
-                try {
-                    const scraped = await scrapePostPage(url);
-                    const landingUrl = await resolveLandingLink(scraped.chosenUrl);
-                    directUrl = landingUrl;
-                    if (landingUrl.includes('vcloud') || landingUrl.includes('hubcloud') || landingUrl.includes('gdflix')) {
-                        directUrl = await resolveVcloudLink(landingUrl);
-                    }
-                } catch (err) {
-                    console.error('[PCommand] Link resolution failed, using original:', err.message);
-                }
-            } else if (url.includes('vcloud') || url.includes('hubcloud') || url.includes('gdflix') || url.includes('fastdl') || url.includes('filebee')) {
-                try {
-                    directUrl = await resolveVcloudLink(url);
-                } catch (err) {
-                    console.error('[PCommand] Vcloud resolution failed:', err.message);
-                }
-            }
-
-            // Basic URL validation
-            if (!directUrl.startsWith('http://') && !directUrl.startsWith('https://')) {
-                await reply(`❌ Invalid link format for item ${i + 1}! Skipping.`);
-                continue;
-            }
-
-            // Keep extension on disk for correct mimetype detection
-            let ext = 'mp4';
-            try {
-                const urlPath = new URL(directUrl).pathname;
-                const urlFile = urlPath.substring(urlPath.lastIndexOf('/') + 1);
-                if (urlFile && urlFile.includes('.')) {
-                    ext = urlFile.split('.').pop();
-                }
-            } catch (err) {}
-
-            const tempFilePath = path.join(__dirname, `tmp_${Date.now()}_${i}.${ext}`);
-
-            // Fetch file
-            const parsedUrl = new URL(directUrl);
-            const response = await axios({
-                method: 'get',
-                url: directUrl,
-                responseType: 'stream',
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': '*/*',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Referer': parsedUrl.origin + '/',
-                    'Origin': parsedUrl.origin
-                },
-                timeout: 600000 // 10 minutes timeout
-            });
-
-            const writer = fs.createWriteStream(tempFilePath);
-            response.data.pipe(writer);
-
-            await new Promise((resolve, reject) => {
-                writer.on('finish', resolve);
-                writer.on('error', reject);
-            });
-
-            if (!fs.existsSync(tempFilePath)) {
-                throw new Error('Downloaded file does not exist on disk.');
-            }
-
-            const stats = fs.statSync(tempFilePath);
-            const sizeInBytes = stats.size;
-            const sizeInMB = (sizeInBytes / (1024 * 1024)).toFixed(2);
-
-            if (sizeInBytes > 2000 * 1024 * 1024) {
-                fs.unlinkSync(tempFilePath);
-                await reply(`❌ File is too large (${sizeInMB} MB). Max upload limit is 2 GB.`);
-                continue;
-            }
-
-            // Detect mime type
-            let mime = response.headers['content-type'] || 'application/octet-stream';
-            try {
-                const fileBuffer = fs.readFileSync(tempFilePath, { start: 0, end: 4100 });
-                const detectedType = await fileType.fromBuffer(fileBuffer);
-                if (detectedType) {
-                    mime = detectedType.mime;
-                    ext = detectedType.ext;
-                }
-            } catch (err) {}
-
-            await reply(`📤 Uploading file: *${displayFilename}* (${sizeInMB} MB)\n📍 To: ${destLabel}`);
-
-            let finalFileName = displayFilename;
-            if (!finalFileName.toLowerCase().endsWith('.' + ext.toLowerCase())) {
-                finalFileName += '.' + ext;
-            }
-
-            // Send the file to destination
-            await conn.sendMessage(destJid, {
-                document: { url: tempFilePath },
-                mimetype: mime,
-                fileName: finalFileName
-            }, isGroupMode ? {} : { quoted: mek });
-
-            if (isGroupMode && destJid !== from) {
-                await reply(`✅ *${displayFilename}* (${sizeInMB} MB) successfully sent to the group!`);
-            }
-
-            // Delete temporary file
-            fs.unlinkSync(tempFilePath);
-        }
-
-        await reply('✅ Processed all items in sequence.');
+        await reply(`✅ TMDB details and poster successfully fetched and sent to: *${destLabel}*`);
 
     } catch (error) {
         console.error('P command error:', error);
@@ -828,7 +724,7 @@ cmd({
         const modeEmoji = settings.mode === 'group' ? '📤' : '📥';
         const modeLabel = settings.mode === 'group'
             ? `Group → *${settings.groupName || 'Unknown'}*\n🆔 \`${settings.groupJid}\``
-            : 'Private Chat (sent to you)';
+            : `Private Chat → *${settings.privateName || 'You'}*\n🆔 \`${settings.privateJid || 'N/A'}\``;
 
         await reply(
             `📊 *Download Config Status*\n\n` +
