@@ -52,5 +52,5 @@ module.exports = {
     ? process.env.SUDO.split(",")
     : ["94717775628", "94758775628"],
   PORT: process.env.PORT || "3000",
-  SESSION_DIR: process.env.SESSION_DIR || "sess",
+  SESSION_DIR: process.env.SESSION_DIR || "session",
 };

@@ -8,7 +8,7 @@ if (fs.existsSync(envPath)) {
     require('dotenv').config({ path: envPath });
 }
 
-const SESSION_DIR = path.join(__dirname, 'sess');
+const SESSION_DIR = path.join(__dirname, 'session');
 
 let pairingCodeRequested = false;
 
