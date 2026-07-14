@@ -68,7 +68,6 @@ function initUpsertListener(conn) {
             if (chatUpdate.type !== 'notify') return;
             const mek = chatUpdate.messages[0];
             if (!mek || !mek.message) return;
-            if (mek.key.fromMe) return; // skip own messages
 
             const from = mek.key.remoteJid;
             const senderJid = mek.key.participant || mek.key.remoteJid;
