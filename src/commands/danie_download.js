@@ -47,7 +47,10 @@ function cleanJid(jid) {
     if (!jid) return '';
     const parts = jid.split('@');
     const user = parts[0].split(':')[0];
-    const server = parts[1] || 's.whatsapp.net';
+    let server = parts[1] || 's.whatsapp.net';
+    if (server === 'c.us' || server === 's.whatsapp.net') {
+        server = 's.whatsapp.net';
+    }
     return `${user}@${server}`;
 }
 
@@ -70,7 +73,10 @@ function initUpsertListener(conn) {
             if (!mek || !mek.message) return;
 
             const from = mek.key.remoteJid;
-            const senderJid = mek.key.participant || mek.key.remoteJid;
+            let senderJid = mek.key.participant || mek.key.remoteJid;
+            if (mek.key.fromMe && conn.user && conn.user.id) {
+                senderJid = conn.user.id;
+            }
             const cleanSender = cleanJid(senderJid);
 
             const body = mek.message.conversation ||
@@ -80,6 +86,9 @@ function initUpsertListener(conn) {
                          '';
             const trimmedText = body.trim();
             if (!trimmedText) return;
+
+            console.log(`[DanieWatch] Raw message received: from="${from}" sender="${senderJid}" cleanSender="${cleanSender}" fromMe=${mek.key.fromMe} text="${trimmedText}"`);
+            console.log(`[DanieWatch] Current pendingConfig keys:`, Object.keys(pendingConfig));
 
             const reply = async (textMsg) => {
                 return conn.sendMessage(from, { text: textMsg }, { quoted: mek });
@@ -101,6 +110,7 @@ function initUpsertListener(conn) {
 
             // ---- Check if it's a plain-number reply for pending config ----
             if (pendingConfig[cleanSender] && !trimmedText.startsWith(PREFIX)) {
+                console.log(`[DanieWatch] Found pending config for ${cleanSender}. Directing text "${trimmedText}" to handleConfigReply.`);
                 await handleConfigReply(conn, mek, null, senderJid, trimmedText, reply);
                 return;
             }
