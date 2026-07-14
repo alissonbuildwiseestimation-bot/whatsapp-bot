@@ -108,38 +108,94 @@
     // Process pages depending on domain
     const host = window.location.hostname;
 
-    if (host.includes('vegamovies') || host.includes('rogmovies') || host.includes('hdhub4u')) {
-        // Main detail pages - find download links
-        const links = document.querySelectorAll('a[href]');
-        links.forEach(link => {
-            const href = link.href;
-            if (!href || href.includes('imdb.com') || href.includes('youtube.com') || href.includes('telegram')) return;
-
-            // Check if link is a download button or contains resolution keywords
-            const text = link.textContent.trim().toLowerCase();
-            const parentText = link.parentElement ? link.parentElement.textContent.toLowerCase() : '';
-            
-            if (href.includes('download') || href.includes('vgmlink') || href.includes('gdflix') || text.includes('download') || text.includes('click here') || text.includes('v-cloud') || text.includes('g-direct')) {
-                // Detect resolution
-                let res = '720p';
-                if (text.includes('1080p') || parentText.includes('1080p')) res = '1080p';
-                else if (text.includes('480p') || parentText.includes('480p')) res = '480p';
-                else if (text.includes('2160p') || text.includes('4k') || parentText.includes('2160p') || parentText.includes('4k')) res = '2160p';
-
-                // Add button next to download link
-                const btn = document.createElement('button');
-                btn.className = 'dw-btn';
-                btn.textContent = `📋 Bot [${res}]`;
-                btn.addEventListener('click', (e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    const cleanTitle = getCleanTitle();
-                    let fileSuffix = `[${res}].mp4`;
-                    copyCommand(`${cleanTitle} ${fileSuffix}`, href);
-                });
-
-                link.parentNode.insertBefore(btn, link.nextSibling);
+    function detectResolution(element) {
+        let parentText = '';
+        let current = element;
+        for (let i = 0; i < 4; i++) {
+            if (!current) break;
+            parentText += ' ' + current.textContent;
+            let heading = current.querySelector('h1, h2, h3, h4, h5, h6, strong');
+            if (heading) parentText += ' ' + heading.textContent;
+            current = current.parentElement;
+        }
+        
+        let prev = element.closest('p, div, center');
+        if (prev) {
+            let prevSibling = prev.previousElementSibling;
+            let checks = 0;
+            while (prevSibling && checks < 5) {
+                const text = prevSibling.textContent;
+                if (text.match(/480p|720p|1080p|2160p|4k/i)) {
+                    parentText += ' ' + text;
+                    break;
+                }
+                prevSibling = prevSibling.previousElementSibling;
+                checks++;
             }
+        }
+
+        const combinedText = parentText.toLowerCase();
+        if (combinedText.includes('2160p') || combinedText.includes('4k')) return '2160p';
+        if (combinedText.includes('1080p')) return '1080p';
+        if (combinedText.includes('720p')) return '720p';
+        if (combinedText.includes('480p')) return '480p';
+        return '720p';
+    }
+
+    if (host.includes('vegamovies') || host.includes('rogmovies') || host.includes('hdhub4u')) {
+        const buttons = [];
+
+        // 1. Grab by class name (vegamovies/rogmovies button template)
+        document.querySelectorAll('button.dwd-button, .dwd-button').forEach(btn => {
+            const link = btn.closest('a');
+            if (link && !buttons.some(b => b.link === link)) {
+                buttons.push({ link, target: btn });
+            }
+        });
+
+        // 2. Grab other anchors matching download patterns
+        document.querySelectorAll('a[href]').forEach(link => {
+            const href = link.href;
+            if (!href || href.startsWith('#')) return;
+
+            const lowerHref = href.toLowerCase();
+            if (lowerHref.includes('/category/') || lowerHref.includes('/tag/') || lowerHref.includes('/genre/') || lowerHref.includes('?s=') || lowerHref.includes('/author/')) {
+                return;
+            }
+
+            if (lowerHref.includes('imdb.com') || lowerHref.includes('youtube.com') || lowerHref.includes('telegram') || lowerHref.includes('facebook') || lowerHref.includes('twitter') || lowerHref.includes('pinterest')) {
+                return;
+            }
+
+            const text = link.textContent.trim().toLowerCase();
+            const isExternal = !href.includes(window.location.hostname);
+            const hasDwdKeyword = text.includes('download') || text.includes('click here') || text.includes('v-cloud') || text.includes('g-direct') || text.includes('hubcloud') || text.includes('gdflix');
+
+            if ((isExternal && hasDwdKeyword) || text === 'download now' || link.classList.contains('btn')) {
+                if (!buttons.some(b => b.link === link)) {
+                    buttons.push({ link, target: link });
+                }
+            }
+        });
+
+        // Inject Bot buttons next to actual download links
+        buttons.forEach(({ link, target }) => {
+            const res = detectResolution(target);
+            
+            const btn = document.createElement('button');
+            btn.className = 'dw-btn';
+            btn.textContent = `📋 Bot [${res}]`;
+            btn.style.marginLeft = '10px';
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const cleanTitle = getCleanTitle();
+                let fileSuffix = `[${res}].mp4`;
+                copyCommand(`${cleanTitle} ${fileSuffix}`, link.href);
+            });
+
+            // Insert next to the anchor link or the button itself
+            link.parentNode.insertBefore(btn, link.nextSibling);
         });
     } else if (host.includes('vcloud') || host.includes('hubcloud') || host.includes('gdflix') || host.includes('vgmlink')) {
         // Redirect/Landing pages or Final V-Cloud page
