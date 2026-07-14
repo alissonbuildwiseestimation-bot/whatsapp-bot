@@ -54,7 +54,6 @@ async function fetchTmdbMetadata(query, mediaType = 'movie', imdbId = null) {
             const url = `https://api.themoviedb.org/3/search/multi?query=${encodeURIComponent(cleanQuery)}&api_key=${TMDB_API_KEY}`;
             const res = await axios.get(url, { headers: HEADERS, timeout: 10000 });
             if (res.data && res.data.results && res.data.results.length > 0) {
-                // Find first movie or tv result
                 details = res.data.results.find(r => r.media_type === 'movie' || r.media_type === 'tv');
             }
         }
@@ -68,8 +67,6 @@ async function fetchTmdbMetadata(query, mediaType = 'movie', imdbId = null) {
         const posterUrl = details.poster_path ? `https://image.tmdb.org/t/p/w500${details.poster_path}` : null;
         const releaseDate = details.release_date || details.first_air_date || '';
         const year = releaseDate ? releaseDate.split('-')[0] : 'N/A';
-
-        // Map genre IDs to names (simplified mapping, or fetch dynamically)
         const genres = details.genre_ids ? details.genre_ids.map(id => getGenreName(id)).filter(Boolean).join(', ') : 'Unknown';
 
         return {
@@ -120,7 +117,6 @@ async function scrapePostPage(url) {
         const rawTitle = $('title').text() || $('h1').text() || '';
         const cleanName = cleanTitle(rawTitle);
 
-        // Parse season and episode from title/url if available
         let season = null;
         let episode = null;
         const sMatch = rawTitle.match(/season\s*(\d+)/i) || rawTitle.match(/\bs(\d+)\b/i);
@@ -128,26 +124,47 @@ async function scrapePostPage(url) {
         if (sMatch) season = parseInt(sMatch[1], 10);
         if (eMatch) episode = parseInt(eMatch[1], 10);
 
-        // 3. Find download links grouped by resolution
+        // 3. Find download links grouped by resolution inside the page content body
         const links = [];
-        $('a[href]').each((_, el) => {
+        const contentSelector = 'main.page-body, .page-body, .entry-content, #main-content';
+        
+        $(contentSelector).find('a[href]').each((_, el) => {
             const href = $(el).attr('href');
             const linkText = $(el).text().trim();
 
-            // Ignore external and non-download links
-            if (!href || href.startsWith('#') || href.includes('imdb.com') || href.includes('youtube.com') || href.includes('telegram') || href.includes('facebook') || href.includes('twitter')) {
+            if (!href || href.trim() === '/' || href.startsWith('#') || href.includes('imdb.com') || href.includes('youtube.com') || href.includes('telegram') || href.includes('facebook') || href.includes('twitter')) {
                 return;
             }
 
-            // Find nearest resolution label (parent element or text)
-            let parentText = '';
-            let current = $(el);
-            for (let i = 0; i < 3; i++) {
-                parentText += ' ' + current.parent().text();
-                current = current.parent();
+            const lowerHref = href.toLowerCase();
+            if (lowerHref.includes('/category/') || lowerHref.includes('/tag/') || lowerHref.includes('/genre/') || lowerHref.includes('?s=') || lowerHref.includes('/author/')) {
+                return;
             }
 
-            // Also check preceding headings
+            // Exclude internal domain links unless it's a direct landing/download link
+            try {
+                const parsedUrl = new URL(url);
+                if (href.includes(parsedUrl.hostname) && !lowerHref.includes('/download') && !lowerHref.includes('nexdrive') && !lowerHref.includes('fastdl')) {
+                    return;
+                }
+            } catch (e) {}
+
+            // Must contain download keywords or wrap a button element
+            const hasButton = $(el).find('button, .dwd-button, .btn').length > 0 || $(el).hasClass('btn') || $(el).hasClass('dwd-button');
+            const hasDwdKeyword = linkText.toLowerCase().includes('download') || 
+                                 linkText.toLowerCase().includes('click here') || 
+                                 linkText.toLowerCase().includes('v-cloud') || 
+                                 linkText.toLowerCase().includes('g-direct') ||
+                                 lowerHref.includes('nexdrive') || 
+                                 lowerHref.includes('vgmlink') || 
+                                 lowerHref.includes('gdflix') || 
+                                 lowerHref.includes('fastdl') || 
+                                 lowerHref.includes('filebee');
+
+            if (!hasButton && !hasDwdKeyword) {
+                return;
+            }
+
             let precedingHeading = '';
             let prev = $(el).closest('p, div').prev();
             while (prev.length && !/^h[1-6]$/i.test(prev[0].name)) {
@@ -157,7 +174,7 @@ async function scrapePostPage(url) {
                 precedingHeading = prev.text();
             }
 
-            const combinedText = `${linkText} ${parentText} ${precedingHeading}`.toLowerCase();
+            const combinedText = `${linkText} ${precedingHeading}`.toLowerCase();
             let resolution = 'Unknown';
             if (combinedText.includes('2160p') || combinedText.includes('4k')) {
                 resolution = '2160p';
@@ -172,14 +189,14 @@ async function scrapePostPage(url) {
             links.push({ text: linkText, href, resolution });
         });
 
-        // 4. Select the best link: Prefer 720p, fall back to 480p, then 1080p, then others
+        // Prioritize: 720p first, then 480p, then 1080p, then any link
         let chosenLink = links.find(l => l.resolution === '720p');
         if (!chosenLink) chosenLink = links.find(l => l.resolution === '480p');
         if (!chosenLink) chosenLink = links.find(l => l.resolution === '1080p');
-        if (!chosenLink) chosenLink = links[0]; // fallback to first link found
+        if (!chosenLink) chosenLink = links[0];
 
         if (!chosenLink) {
-            throw new Error('No download links found on the page.');
+            throw new Error('No download links found in post body.');
         }
 
         return {
@@ -204,7 +221,6 @@ async function resolveLandingLink(url) {
         let currentUrl = url;
         console.log('[MovieScraper] Resolving landing link:', currentUrl);
 
-        // Fetch page HTML
         const res = await axios.get(currentUrl, {
             headers: HEADERS,
             timeout: 15000,
@@ -214,13 +230,19 @@ async function resolveLandingLink(url) {
 
         const $ = cheerio.load(res.data);
 
-        // Search for V-Cloud, HubCloud, GDFlix, or KMHD links in page anchors
+        // Keywords for final hosts (exclude landing domains like nexdrive/vgmlink/gdflix if we are already on them)
+        const currentDomain = new URL(currentUrl).hostname.toLowerCase();
+        const keywords = ['vcloud', 'hubcloud', 'gdflix', 'katdrive', 'kmhd', 'vgmlink', 'fastdl', 'filebee', 'nexdrive']
+            .filter(kw => !currentDomain.includes(kw));
+        
         let resolvedUrl = null;
         $('a[href]').each((_, el) => {
             const href = $(el).attr('href');
-            if (href && (href.includes('vcloud') || href.includes('hubcloud') || href.includes('gdflix') || href.includes('katdrive') || href.includes('kmhd') || href.includes('vgmlink'))) {
-                resolvedUrl = href;
-                return false; // break
+            if (href && keywords.some(kw => href.toLowerCase().includes(kw))) {
+                if (!href.includes('/category/') && !href.includes('/tag/') && !href.includes('?s=')) {
+                    resolvedUrl = href;
+                    return false;
+                }
             }
         });
 
@@ -229,9 +251,8 @@ async function resolveLandingLink(url) {
             return resolvedUrl;
         }
 
-        // If no explicit download cloud link found, check if it redirected to a cloud domain
         const finalUrl = res.request.res.responseUrl || currentUrl;
-        if (finalUrl.includes('vcloud') || finalUrl.includes('hubcloud') || finalUrl.includes('gdflix') || finalUrl.includes('kmhd')) {
+        if (keywords.some(kw => finalUrl.toLowerCase().includes(kw))) {
             return finalUrl;
         }
 
@@ -243,15 +264,48 @@ async function resolveLandingLink(url) {
 }
 
 /**
- * Extract direct download links from V-Cloud / HubCloud pages
+ * Extract direct download links from V-Cloud / HubCloud / Fastdl / Filebee pages
  */
 async function resolveVcloudLink(url) {
     try {
         console.log('[MovieScraper] Resolving V-Cloud/HubCloud link:', url);
+
+        // 1. Handle Filebee links directly
+        if (url.includes('filebee.xyz')) {
+            const res = await axios.get(url, { headers: HEADERS, timeout: 15000 });
+            const $ = cheerio.load(res.data);
+            const dlLink = $('a[href*="cdn-cgi/content"], a[href*="filepress"]').attr('href');
+            if (dlLink) {
+                console.log('[MovieScraper] Resolved direct Filebee link:', dlLink);
+                return dlLink;
+            }
+        }
+
+        // 2. Handle Fastdl direct link redirection
+        if (url.includes('fastdl.zip')) {
+            const res = await axios.get(url, { headers: HEADERS, timeout: 15000 });
+            const scriptContent = res.data;
+            const reurlRegex = /reurl\s*=\s*['"]([^'"]+)['"]/i;
+            const match = reurlRegex.exec(scriptContent);
+            if (match && match[1]) {
+                const reurl = match[1];
+                try {
+                    const parsedUrl = new URL(reurl);
+                    const linkParam = parsedUrl.searchParams.get('link');
+                    if (linkParam) {
+                        console.log('[MovieScraper] Resolved direct Google User Content link from Fastdl:', linkParam);
+                        return linkParam;
+                    }
+                } catch (e) {}
+                console.log('[MovieScraper] Resolved Fastdl target:', reurl);
+                return reurl;
+            }
+        }
+
         const res = await axios.get(url, { headers: HEADERS, timeout: 15000 });
         const $ = cheerio.load(res.data);
 
-        // 1. Look for inline JavaScript double base64 atob encoding: atob(atob('...'))
+        // 3. Look for inline JavaScript double base64 atob encoding or var url = '...'
         const scriptContent = $('script').text() || '';
         let decodedLink = null;
 
@@ -267,7 +321,6 @@ async function resolveVcloudLink(url) {
             }
         }
 
-        // Fallback: var url = '...'
         if (!decodedLink) {
             const varUrlRegex = /var\s+url\s*=\s*['"]([^'"]+)['"]/i;
             const matchVar = varUrlRegex.exec(scriptContent);
@@ -277,7 +330,6 @@ async function resolveVcloudLink(url) {
             }
         }
 
-        // 2. If it's a video player page (e.g. /video/id), get the download button
         if (!decodedLink && url.includes('/video/')) {
             const videoDl = $('div.vd > center > a').attr('href');
             if (videoDl) {
@@ -286,37 +338,38 @@ async function resolveVcloudLink(url) {
         }
 
         if (decodedLink) {
-            // Reconstruct full URL if relative
             if (!decodedLink.startsWith('http')) {
                 const parsed = new URL(url);
                 decodedLink = `${parsed.protocol}//${parsed.host}${decodedLink.startsWith('/') ? '' : '/'}${decodedLink}`;
             }
 
-            // Fetch the decoded download landing page
             console.log('[MovieScraper] Fetching final download landing page:', decodedLink);
             const dlRes = await axios.get(decodedLink, { headers: HEADERS, timeout: 15000 });
             const dl$ = cheerio.load(dlRes.data);
 
-            // Locate final download links
             const finalLinks = [];
-            dl$('h2 a.btn, div.card-body a.btn, a.btn').each((_, el) => {
+            dl$('h2 a.btn, div.card-body a.btn, a.btn, a[href]').each((_, el) => {
                 const href = dl$(el).attr('href');
                 const text = dl$(el).text().trim();
-                if (href) {
+                if (href && (href.startsWith('http') || href.startsWith('/'))) {
                     finalLinks.push({ text, href });
                 }
             });
 
-            // Prioritize Pixeldrain, Mega, FSL Server, Download File
-            let best = finalLinks.find(l => l.text.toLowerCase().includes('pixeldrain'));
-            if (!best) best = finalLinks.find(l => l.text.toLowerCase().includes('download file'));
-            if (!best) best = finalLinks.find(l => l.text.toLowerCase().includes('fsl server') || l.text.toLowerCase().includes('fslv2'));
+            // Prioritize raw R2 Direct Cloud Storage links, then 10Gbps Server, then Pixeldrain, then Mega
+            let best = finalLinks.find(l => l.text.toLowerCase().includes('fslv2') || l.text.toLowerCase().includes('fsl server'));
+            if (!best) best = finalLinks.find(l => l.text.toLowerCase().includes('10gbps') || l.text.toLowerCase().includes('10gbps server'));
+            if (!best) best = finalLinks.find(l => l.text.toLowerCase().includes('pixeldrain') || l.text.toLowerCase().includes('pixelserver'));
             if (!best) best = finalLinks.find(l => l.text.toLowerCase().includes('mega server'));
-            if (!best) best = finalLinks[0]; // fallback
+            if (!best) best = finalLinks.find(l => l.text.toLowerCase().includes('download file'));
+            if (!best) best = finalLinks[0];
 
             if (best) {
                 let directUrl = best.href;
-                // If it's Pixeldrain, format for API download
+                if (!directUrl.startsWith('http')) {
+                    const parsed = new URL(decodedLink);
+                    directUrl = `${parsed.protocol}//${parsed.host}${directUrl.startsWith('/') ? '' : '/'}${directUrl}`;
+                }
                 if (directUrl.includes('pixeldrain.com/u/')) {
                     const id = directUrl.split('/u/')[1].split('?')[0];
                     directUrl = `https://pixeldrain.com/api/file/${id}?download`;
@@ -326,7 +379,6 @@ async function resolveVcloudLink(url) {
             }
         }
 
-        // Fallback: If no scripting/decoding succeeded, check if the V-Cloud page itself has direct links
         const directBtn = $('a:contains("Download File")').attr('href') || $('a:contains("FSL Server")').attr('href');
         if (directBtn) {
             return directBtn;
