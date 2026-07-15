@@ -3,7 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const fileType = require('file-type');
-const { fetchTmdbMetadata, fetchTmdbById, scrapePostPage, resolveLandingLink, resolveVcloudLink } = require('../Utils/movie_scraper');
+const { fetchTmdbMetadata, fetchTmdbById, scrapePostPage, resolveLandingLink, resolveVcloudLink, scrapeAllPostLinks, extractDirectDownloadLinks } = require('../Utils/movie_scraper');
 
 function cleanFileName(filename) {
     if (!filename) return '';
@@ -102,6 +102,8 @@ function cleanJid(jid) {
 }
 
 const pendingConfig = {};
+const pendingSearch = {};
+const VEGAMOVIES_DOMAIN = 'https://vegamovies.navy';
 
 // Our command prefix
 const PREFIX = '.';
@@ -159,6 +161,13 @@ function initUpsertListener(conn) {
             if (pendingConfig[cleanSender] && !trimmedText.startsWith(PREFIX)) {
                 console.log(`[DanieWatch] Found pending config for ${cleanSender}. Directing text "${trimmedText}" to handleConfigReply.`);
                 await handleConfigReply(conn, mek, null, senderJid, trimmedText, reply);
+                return;
+            }
+
+            // ---- Check if it's a plain-number reply for pending search/resolution ----
+            if (pendingSearch[cleanSender] && !trimmedText.startsWith(PREFIX)) {
+                console.log(`[DanieWatch] Found pending search for ${cleanSender}. Directing text "${trimmedText}" to handleSearchReply.`);
+                await handleSearchReply(conn, mek, senderJid, trimmedText, reply);
                 return;
             }
         } catch (err) {
@@ -1030,6 +1039,261 @@ DANIE_COMMANDS['download'] = async (conn, mek, from, senderJid, args, reply) => 
 DANIE_COMMANDS['p'] = async (conn, mek, from, senderJid, args, reply) => {
     await pCommandHandler(conn, mek, from, senderJid, args, reply);
 };
+
+DANIE_COMMANDS['search'] = async (conn, mek, from, senderJid, args, reply) => {
+    await searchCommandHandler(conn, mek, from, senderJid, args, reply);
+};
+
+async function searchCommandHandler(conn, mek, from, senderJid, q, reply) {
+    try {
+        if (!q || !q.trim()) {
+            return reply('❌ Please provide a search keyword!\n\n*Usage:*\n`.search Deadpool`');
+        }
+
+        const query = q.trim();
+        await reply(`🔍 Searching Vegamovies for *"${query}"*...`);
+
+        initUpsertListener(conn);
+
+        const url = `${VEGAMOVIES_DOMAIN}/search.php?q=${encodeURIComponent(query)}&page=1`;
+        console.log(`[DanieSearch] Fetching Vegamovies search API: ${url}`);
+        
+        const res = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Referer': VEGAMOVIES_DOMAIN + '/'
+            },
+            timeout: 15000
+        });
+
+        if (!res.data || res.data.found === 0 || !res.data.hits || res.data.hits.length === 0) {
+            return reply(`❌ No search results found for *"${query}"* on Vegamovies.`);
+        }
+
+        const hits = res.data.hits;
+        const results = hits.map(h => ({
+            title: h.document.post_title.replace(/&amp;/g, '&'),
+            permalink: h.document.permalink,
+            thumbnail: h.document.post_thumbnail
+        }));
+
+        const cleanSender = cleanJid(senderJid);
+        pendingSearch[cleanSender] = {
+            step: 'select_movie',
+            results: results
+        };
+
+        let responseText = `🔍 *Vegamovies Search Results for "${query}":*\n\n`;
+        results.forEach((r, idx) => {
+            responseText += `  \`${idx + 1}\` — ${r.title}\n`;
+        });
+        responseText += `\n_Reply with the number of the movie you want to select._`;
+
+        await reply(responseText);
+    } catch(err) {
+        console.error('[DanieSearch] Search failed:', err.message);
+        reply(`❌ Search failed: ${err.message}`);
+    }
+}
+
+async function handleSearchReply(conn, mek, senderJid, text, reply) {
+    const cleanSender = cleanJid(senderJid);
+    const state = pendingSearch[cleanSender];
+    if (!state) return;
+
+    const from = mek.key.remoteJid;
+    const num = parseInt(text.trim(), 10);
+
+    if (state.step === 'select_movie') {
+        const movies = state.results || [];
+        if (isNaN(num) || num < 1 || num > movies.length) {
+            return reply(`❌ Invalid movie number. Reply with a number from 1 to ${movies.length}.`);
+        }
+
+        const selectedMovie = movies[num - 1];
+        await reply(`⏳ Fetching resolutions and download links for:\n🎬 *${selectedMovie.title}*...`);
+
+        try {
+            const postUrl = selectedMovie.permalink.startsWith('http') 
+                ? selectedMovie.permalink 
+                : `${VEGAMOVIES_DOMAIN}${selectedMovie.permalink}`;
+
+            console.log(`[DanieSearch] Scraping post page: ${postUrl}`);
+            const allLinks = await scrapeAllPostLinks(postUrl);
+
+            // Filter out unrelated links (keep only those that point to redirect/landing pages)
+            const validLinks = allLinks.filter(l => {
+                const lowerHref = l.href.toLowerCase();
+                return lowerHref.includes('nexdrive') || 
+                       lowerHref.includes('vgmlink') || 
+                       lowerHref.includes('gdflix') || 
+                       lowerHref.includes('fastdl') || 
+                       lowerHref.includes('filebee') || 
+                       lowerHref.includes('hubcloud') || 
+                       lowerHref.includes('vcloud') || 
+                       lowerHref.includes('katdrive') || 
+                       lowerHref.includes('kmhd') || 
+                       lowerHref.includes('fastdl.zip');
+            });
+
+            if (validLinks.length === 0) {
+                delete pendingSearch[cleanSender];
+                return reply(`❌ No valid download links could be parsed from this post.`);
+            }
+
+            // Update state
+            pendingSearch[cleanSender] = {
+                step: 'select_resolution',
+                title: selectedMovie.title,
+                thumbnail: selectedMovie.thumbnail,
+                links: validLinks
+            };
+
+            let listText = `🎬 *${selectedMovie.title}*\n\nSelect a resolution to download:\n\n`;
+            validLinks.forEach((l, i) => {
+                const label = l.heading ? `${l.heading} (${l.resolution})` : `${l.text} (${l.resolution})`;
+                listText += `  \`${i + 1}\` — ${label}\n`;
+            });
+            listText += `\n_Reply with the number of the resolution you want._`;
+
+            // Try to download and send the movie poster first, then resolutions list
+            let posterSent = false;
+            const posterUrl = selectedMovie.thumbnail;
+            if (posterUrl) {
+                const tempPosterPath = path.join(__dirname, 'tmp_search_poster_' + Date.now() + '.jpg');
+                try {
+                    const posterResponse = await axios({
+                        method: 'get',
+                        url: posterUrl,
+                        responseType: 'stream',
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        },
+                        timeout: 15000
+                    });
+                    const writer = fs.createWriteStream(tempPosterPath);
+                    posterResponse.data.pipe(writer);
+                    await new Promise((resolve, reject) => {
+                        writer.on('finish', resolve);
+                        writer.on('error', reject);
+                    });
+
+                    if (fs.existsSync(tempPosterPath)) {
+                        await conn.sendMessage(from, {
+                            image: { url: tempPosterPath },
+                            caption: listText
+                        }, { quoted: mek });
+                        posterSent = true;
+                        fs.unlinkSync(tempPosterPath);
+                    }
+                } catch (err) {
+                    console.error('[DanieSearch] Failed to fetch/send search poster:', err.message);
+                    if (fs.existsSync(tempPosterPath)) {
+                        try { fs.unlinkSync(tempPosterPath); } catch (_) {}
+                    }
+                }
+            }
+
+            if (!posterSent) {
+                await reply(listText);
+            }
+        } catch (err) {
+            console.error('[DanieSearch] Failed to load movie post details:', err.message);
+            delete pendingSearch[cleanSender];
+            reply(`❌ Failed to load movie details: ${err.message}`);
+        }
+    } else if (state.step === 'select_resolution') {
+        const links = state.links || [];
+        if (isNaN(num) || num < 1 || num > links.length) {
+            return reply(`❌ Invalid resolution number. Reply with a number from 1 to ${links.length}.`);
+        }
+
+        const selectedLink = links[num - 1];
+        await reply(`⏳ Resolving download hosts for: *${selectedLink.heading || selectedLink.text}*...\nThis may take up to 30 seconds.`);
+
+        try {
+            console.log(`[DanieSearch] Resolving direct host links for redirect url: ${selectedLink.href}`);
+            const directHosts = await extractDirectDownloadLinks(selectedLink.href);
+
+            if (!directHosts || directHosts.length === 0) {
+                delete pendingSearch[cleanSender];
+                return reply(`❌ No direct download links could be resolved for this resolution.`);
+            }
+
+            // Update state to wait for host selection
+            pendingSearch[cleanSender] = {
+                step: 'select_direct_link',
+                title: state.title,
+                resolutionHeading: selectedLink.heading || selectedLink.text,
+                directHosts: directHosts
+            };
+
+            let hostListText = `🌐 *Select a download host for:* \n_${selectedLink.heading || selectedLink.text}_\n\n`;
+            directHosts.forEach((host, idx) => {
+                hostListText += `  \`${idx + 1}\` — ${host.text}\n`;
+            });
+            hostListText += `\n_Reply with the host number to start the download/upload process._`;
+
+            await reply(hostListText);
+        } catch (err) {
+            console.error('[DanieSearch] Failed to resolve hosts:', err.message);
+            delete pendingSearch[cleanSender];
+            reply(`❌ Failed to resolve download hosts: ${err.message}`);
+        }
+    } else if (state.step === 'select_direct_link') {
+        const hosts = state.directHosts || [];
+        if (isNaN(num) || num < 1 || num > hosts.length) {
+            return reply(`❌ Invalid host number. Reply with a number from 1 to ${hosts.length}.`);
+        }
+
+        const chosenHost = hosts[num - 1];
+        await reply(`✅ Host selected: *${chosenHost.text}*\n⏳ Resolving direct link and initiating download/upload pipeline...`);
+
+        // Clear the interactive search session now
+        delete pendingSearch[cleanSender];
+
+        try {
+            let finalDirectUrl = chosenHost.href;
+            console.log(`[DanieSearch] Chosen host redirect link: ${finalDirectUrl}`);
+
+            // If the URL points to a redirector/landing page, resolve it first
+            if (finalDirectUrl.includes('fastdl.zip') || finalDirectUrl.includes('vcloud.zip') || finalDirectUrl.includes('hubcloud') || finalDirectUrl.includes('filebee.xyz') || finalDirectUrl.includes('gdflix')) {
+                finalDirectUrl = await resolveVcloudLink(finalDirectUrl);
+            }
+            console.log(`[DanieSearch] Resolved direct link: ${finalDirectUrl}`);
+
+            // Prepare download query format: "Movie_Title = URL"
+            let sanitizedTitle = (state.resolutionHeading || state.title || 'Movie')
+                .replace(/[:*?"<>|\\/]/g, '') // remove invalid filename chars
+                .trim();
+            
+            const downloadQuery = `${sanitizedTitle} = ${finalDirectUrl}`;
+            console.log(`[DanieSearch] Handing over query to download command: "${downloadQuery}"`);
+
+            // Execute bot download command
+            await downloadCommandHandler(conn, mek, from, senderJid, downloadQuery, reply);
+        } catch (err) {
+            console.error('[DanieSearch] Download handover failed:', err.message);
+            reply(`❌ Failed to download file: ${err.message}`);
+        }
+    }
+}
+
+cmd({
+    pattern: 'search',
+    react: '🔍',
+    desc: 'Searches for movies/series on Vegamovies and allows interactive resolution selection and download.',
+    category: 'download',
+    use: '.search <keyword>',
+    filename: __filename
+}, async (conn, mek, m, { from, quoted, q }) => {
+    const reply = async (textMsg) => {
+        return conn.sendMessage(from, { text: textMsg }, { quoted: mek });
+    };
+    const senderJid = m.sender || mek.sender || from;
+    await searchCommandHandler(conn, mek, from, senderJid, q, reply);
+});
 
 // Export initUpsertListener so command.js can auto-initialize it
 module.exports.initUpsertListener = initUpsertListener;

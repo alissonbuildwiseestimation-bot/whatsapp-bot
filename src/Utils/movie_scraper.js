@@ -433,11 +433,154 @@ async function resolveVcloudLink(url) {
     }
 }
 
+/**
+ * Scrape all download links on a Vegamovies/Rogmovies/HDHub4u post page
+ */
+async function scrapeAllPostLinks(url) {
+    try {
+        const response = await axios.get(url, { headers: HEADERS, timeout: 15000 });
+        const $ = cheerio.load(response.data);
+
+        const links = [];
+        const contentSelector = 'main.page-body, .page-body, .entry-content, #main-content, div.content-kuss, div.content-area';
+
+        $(contentSelector).find('a[href]').each((_, el) => {
+            const href = $(el).attr('href');
+            const linkText = $(el).text().trim();
+
+            if (!href || href.trim() === '/' || href.startsWith('#') || href.includes('imdb.com') || href.includes('youtube.com') || href.includes('telegram') || href.includes('facebook') || href.includes('twitter')) {
+                return;
+            }
+
+            const lowerHref = href.toLowerCase();
+            if (lowerHref.includes('/category/') || lowerHref.includes('/tag/') || lowerHref.includes('/genre/') || lowerHref.includes('?s=') || lowerHref.includes('/author/')) {
+                return;
+            }
+
+            // Exclude internal domain links (related posts) unless they point to a download landing page
+            try {
+                const parsedUrl = new URL(url);
+                if (href.includes(parsedUrl.hostname) && !lowerHref.includes('/download') && !lowerHref.includes('nexdrive') && !lowerHref.includes('fastdl')) {
+                    return;
+                }
+            } catch (e) {}
+
+            const hasButton = $(el).find('button, .dwd-button, .btn').length > 0 || $(el).hasClass('btn') || $(el).hasClass('dwd-button');
+            const hasDwdKeyword = linkText.toLowerCase().includes('download') || 
+                                 linkText.toLowerCase().includes('click here') || 
+                                 linkText.toLowerCase().includes('v-cloud') || 
+                                 linkText.toLowerCase().includes('g-direct') ||
+                                 lowerHref.includes('nexdrive') || 
+                                 lowerHref.includes('vgmlink') || 
+                                 lowerHref.includes('gdflix') || 
+                                 lowerHref.includes('fastdl') || 
+                                 lowerHref.includes('filebee');
+
+            if (!hasButton && !hasDwdKeyword) {
+                return;
+            }
+
+            let precedingHeading = '';
+            let prev = $(el).closest('p, div').prev();
+            while (prev.length && !/^h[1-6]$/i.test(prev[0].name)) {
+                prev = prev.prev();
+            }
+            if (prev.length) {
+                precedingHeading = prev.text().trim();
+            }
+
+            const combinedText = `${linkText} ${precedingHeading}`.toLowerCase();
+            let resolution = 'Unknown';
+            if (combinedText.includes('2160p') || combinedText.includes('4k')) {
+                resolution = '2160p';
+            } else if (combinedText.includes('1080p')) {
+                resolution = '1080p';
+            } else if (combinedText.includes('720p')) {
+                resolution = '720p';
+            } else if (combinedText.includes('480p')) {
+                resolution = '480p';
+            }
+
+            links.push({ text: linkText, href, resolution, heading: precedingHeading });
+        });
+
+        return links;
+    } catch (err) {
+        console.error('[MovieScraper] scrapeAllPostLinks failed:', err.message);
+        throw err;
+    }
+}
+
+/**
+ * Follow redirects and extract all available direct download buttons/links (FSL, GDrive, PixelDrain, Mega, etc.) from the landing page
+ */
+async function extractDirectDownloadLinks(url) {
+    try {
+        console.log('[MovieScraper] Fetching landing page to extract hosts:', url);
+        const res = await axios.get(url, { headers: HEADERS, timeout: 15000 });
+        const $ = cheerio.load(res.data);
+        
+        const hosts = [];
+        const keywords = ['fastdl', 'vcloud', 'filebee', 'gofile', 'vikingfile', 'megaup', 'gdflix', 'katdrive', 'kmhd', 'hubcloud', 'pixeldrain', 'drive.google', 'mega.nz', 'yodrive', 'shared'];
+        
+        $('a[href]').each((_, el) => {
+            const href = $(el).attr('href');
+            let text = $(el).text().trim().replace(/\s+/g, ' ');
+            if (!href) return;
+            
+            const lowerHref = href.toLowerCase();
+            const lowerText = text.toLowerCase();
+            
+            // Check if the link points to a download host or contains download keywords
+            const isHostLink = keywords.some(kw => lowerHref.includes(kw));
+            const isDownloadBtn = lowerText.includes('download') || lowerText.includes('direct') || lowerText.includes('drive') || lowerText.includes('server') || lowerText.includes('cloud');
+            
+            if (isHostLink || isDownloadBtn) {
+                // Exclude category, tag, etc.
+                if (lowerHref.includes('/category/') || lowerHref.includes('/tag/') || lowerHref.includes('/genre/') || lowerHref.includes('?s=')) {
+                    return;
+                }
+                // Exclude logo/home links
+                if (href === '/' || (href.includes('nexdrive.fit') && !lowerHref.includes('/download') && !lowerHref.includes('?'))) {
+                    return;
+                }
+                
+                // Clean up text if it is just a URL
+                if (text.startsWith('http')) {
+                    try {
+                        const parsed = new URL(text);
+                        text = parsed.hostname;
+                    } catch(e) {}
+                }
+                
+                // Avoid duplicates
+                if (!hosts.some(h => h.href === href)) {
+                    hosts.push({ text: text || 'Download Link', href });
+                }
+            }
+        });
+        
+        if (hosts.length > 0) {
+            return hosts;
+        }
+        
+        // Fallback to resolving the first landing link if we didn't find any direct links
+        let landingUrl = await resolveLandingLink(url);
+        return [{ text: 'Default Download Link', href: landingUrl }];
+    } catch (err) {
+        console.error('[MovieScraper] extractDirectDownloadLinks failed:', err.message);
+        return [{ text: 'Original Landing Link', href: url }];
+    }
+}
+
 module.exports = {
     fetchTmdbMetadata,
     fetchTmdbById,
     scrapePostPage,
     resolveLandingLink,
     resolveVcloudLink,
-    cleanTitle
+    cleanTitle,
+    scrapeAllPostLinks,
+    extractDirectDownloadLinks
 };
+
