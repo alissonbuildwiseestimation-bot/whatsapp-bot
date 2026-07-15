@@ -1298,7 +1298,7 @@ async function searchCommandHandler(conn, mek, from, senderJid, q, reply) {
     }
 }
 
-async function executeFallbackDownload(conn, mek, from, senderJid, state, chosenHost, reply) {
+async function executeFallbackDownload(conn, mek, from, senderJid, state, chosenHosts, reply) {
     const controller = new AbortController();
     const activeDownloadRef = { filePath: null };
     state.activeDownload = {
@@ -1312,26 +1312,55 @@ async function executeFallbackDownload(conn, mek, from, senderJid, state, chosen
     // Start background download pipeline
     (async () => {
         try {
-            // Resolve sub-options for the chosen host (landing page URL)
+            const hostsList = Array.isArray(chosenHosts) ? chosenHosts : [chosenHosts];
             let candidates = [];
             
-            if (isLandingUrl(chosenHost.href)) {
-                console.log(`[DanieSearch] Resolving sub-options for landing url: ${chosenHost.href}`);
-                const subOpts = await extractSubOptions(chosenHost.href);
-                
-                // Find candidates in order of priority: 10gbps -> fslv2 -> fsl
-                const opt10gbps = subOpts.find(opt => opt.text.toLowerCase().includes('10gbps'));
-                const optFslv2 = subOpts.find(opt => opt.text.toLowerCase().includes('fslv2'));
-                const optFsl = subOpts.find(opt => opt.text.toLowerCase().includes('fsl') && !opt.text.toLowerCase().includes('fslv2'));
-                
-                if (opt10gbps) candidates.push({ name: '10Gbps Server', href: opt10gbps.href });
-                if (optFslv2) candidates.push({ name: 'FSLv2 Server', href: optFslv2.href });
-                if (optFsl) candidates.push({ name: 'FSL Server', href: optFsl.href });
+            const candidates10g = [];
+            const candidatesFslv2 = [];
+            const candidatesFsl = [];
+            const candidatesOther = [];
+
+            for (const host of hostsList) {
+                if (isLandingUrl(host.href)) {
+                    console.log(`[DanieSearch] Resolving sub-options for landing url: ${host.href}`);
+                    try {
+                        const subOpts = await extractSubOptions(host.href);
+                        
+                        const opt10gbps = subOpts.find(opt => opt.text.toLowerCase().includes('10gbps'));
+                        const optFslv2 = subOpts.find(opt => opt.text.toLowerCase().includes('fslv2'));
+                        const optFsl = subOpts.find(opt => opt.text.toLowerCase().includes('fsl') && !opt.text.toLowerCase().includes('fslv2'));
+                        
+                        if (opt10gbps) candidates10g.push({ name: '10Gbps Server', href: opt10gbps.href });
+                        if (optFslv2) candidatesFslv2.push({ name: 'FSLv2 Server', href: optFslv2.href });
+                        if (optFsl) candidatesFsl.push({ name: 'FSL Server', href: optFsl.href });
+                        
+                        subOpts.forEach(opt => {
+                            const txt = opt.text.toLowerCase();
+                            if (!txt.includes('10gbps') && !txt.includes('fsl') && !txt.includes('fslv2') && !txt.includes('login') && !txt.includes('admin')) {
+                                candidatesOther.push({ name: opt.text, href: opt.href });
+                            }
+                        });
+                    } catch (subErr) {
+                        console.error(`[DanieSearch] Failed to extract sub-options for ${host.href}:`, subErr.message);
+                    }
+                } else {
+                    candidatesOther.push({ name: host.text || 'Direct Link', href: host.href });
+                }
             }
+
+            // Combine in priority order: 10Gbps -> FSLv2 -> FSL -> Others
+            candidates = [
+                ...candidates10g,
+                ...candidatesFslv2,
+                ...candidatesFsl,
+                ...candidatesOther
+            ];
             
-            // If no specific candidates found or it's not a landing URL, try the direct host URL itself
+            // If no specific candidates found, fallback to original hosts themselves
             if (candidates.length === 0) {
-                candidates.push({ name: 'Direct Link', href: chosenHost.href });
+                for (const host of hostsList) {
+                    candidates.push({ name: host.text || 'Direct Link', href: host.href });
+                }
             }
 
             console.log(`[DanieSearch] Fallback system candidates:`, candidates.map(c => c.name));
@@ -1341,8 +1370,9 @@ async function executeFallbackDownload(conn, mek, from, senderJid, state, chosen
                 .replace(/[:*?"<>|\\/]/g, '') // remove invalid filename chars
                 .trim();
             
-            if (chosenHost.episode) {
-                sanitizedTitle = `${sanitizedTitle} ${chosenHost.episode}`;
+            const primaryHost = hostsList[0] || {};
+            if (primaryHost.episode) {
+                sanitizedTitle = `${sanitizedTitle} ${primaryHost.episode}`;
             }
 
             let downloadSuccess = false;
@@ -1581,9 +1611,8 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
                     state.messageId = sent.key.id;
                 }
             } else {
-                // Movie or single file! Directly execute fallback download on the first host
-                const chosenHost = directHosts[0];
-                await executeFallbackDownload(conn, mek, from, senderJid, state, chosenHost, reply);
+                // Movie or single file! Directly execute fallback download on all direct hosts
+                await executeFallbackDownload(conn, mek, from, senderJid, state, directHosts, reply);
             }
         } catch (err) {
             console.error('[DanieSearch] Failed to resolve hosts:', err.message);
@@ -1602,11 +1631,8 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
             return reply(`❌ No download hosts found for this episode.`);
         }
 
-        // Choose the first host under this episode (the landing link)
-        const chosenHost = episodeHosts[0];
-
-        // Trigger fallback download pipeline
-        await executeFallbackDownload(conn, mek, from, senderJid, state, chosenHost, reply);
+        // Trigger fallback download pipeline with all mirror hosts for this episode
+        await executeFallbackDownload(conn, mek, from, senderJid, state, episodeHosts, reply);
     }
 }
 
