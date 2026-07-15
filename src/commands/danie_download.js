@@ -144,7 +144,7 @@ function initUpsertListener(conn) {
             // ---- Check if it's one of our dot-commands ----
             if (trimmedText.startsWith(PREFIX)) {
                 const withoutPrefix = trimmedText.slice(PREFIX.length);
-                const spaceIdx = withoutPrefix.indexOf(' ');
+                const spaceIdx = withoutPrefix.search(/\s/);
                 const cmdName = (spaceIdx === -1 ? withoutPrefix : withoutPrefix.slice(0, spaceIdx)).toLowerCase();
                 const args = spaceIdx === -1 ? '' : withoutPrefix.slice(spaceIdx + 1).trim();
 
@@ -180,11 +180,15 @@ function parseDownloadItem(item) {
     let customFilename = null;
     let url = item.trim();
 
-    if (item.includes('=')) {
-        const parts = item.split('=').map(p => p.trim());
-        if (parts.length >= 2) {
-            customFilename = parts[0];
-            url = parts.slice(1).join('=').trim();
+    const firstEqIdx = item.indexOf('=');
+    if (firstEqIdx !== -1) {
+        const leftPart = item.substring(0, firstEqIdx).trim();
+        const rightPart = item.substring(firstEqIdx + 1).trim();
+        
+        // If the left part does NOT start with a URL protocol, it is the custom filename
+        if (!leftPart.startsWith('http://') && !leftPart.startsWith('https://')) {
+            customFilename = leftPart;
+            url = rightPart;
         }
     } else {
         const lastSpaceIdx = item.lastIndexOf(' ');
@@ -469,8 +473,12 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply) {
                 await reply(`⏳ Processing file *${i + 1}/${items.length}*...\n📍 Target: ${targetFilename || 'Auto-detect'}`);
             }
 
-            // 1. Movie Page Autodetect & Scrape for Vegamovies, Rogmovies, or HDHub4u
-            const isMoviePage = ['vegamovies', 'rogmovies', 'hdhub4u'].some(domain => url.toLowerCase().includes(domain));
+            // 1. Movie Page Autodetect & Scrape for Vegamovies, Rogmovies, or HDHub4u (checks domain only to avoid matching filenames in paths)
+            let isMoviePage = false;
+            try {
+                const hostname = new URL(url).hostname.toLowerCase();
+                isMoviePage = ['vegamovies', 'rogmovies', 'hdhub4u'].some(domain => hostname.includes(domain));
+            } catch (err) {}
             if (isMoviePage) {
                 try {
                     await reply(`🔍 Resolving movie/series download link from page...\n🔗 ${url}`);
@@ -513,7 +521,7 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply) {
 
             // Basic URL validation
             if (!url.startsWith('http://') && !url.startsWith('https://')) {
-                await reply(`❌ Invalid link format for item ${i + 1}! Skipping.`);
+                await reply(`❌ Invalid link format for item ${i + 1}! Skipping.\nParsed URL: \`${url}\``);
                 continue;
             }
 
