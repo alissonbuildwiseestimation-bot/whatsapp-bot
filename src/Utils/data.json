@@ -178,5 +178,17 @@
         "cmd": ".ping"
       }
     ]
+  },
+  {
+    "3EB079F8F527531FBA4CB0": [
+      {
+        "cmdId": "1",
+        "cmd": ".menu"
+      },
+      {
+        "cmdId": "2",
+        "cmd": ".ping"
+      }
+    ]
   }
 ]
