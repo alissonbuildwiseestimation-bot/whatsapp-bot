@@ -1348,6 +1348,7 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
                     state.activeDownload = null;
                 }
             }
+        })();
     }
 }
 
