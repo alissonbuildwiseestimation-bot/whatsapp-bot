@@ -435,6 +435,58 @@ cmd({
     }
 });
 
+function parseQueryToItems(q) {
+    if (!q) return [];
+    
+    // Find all HTTP/HTTPS URLs with their indices
+    const urlRegex = /https?:\/\/[^\s,]+/gi;
+    const matches = [];
+    let match;
+    while ((match = urlRegex.exec(q)) !== null) {
+        matches.push({
+            url: match[0],
+            index: match.index,
+            length: match[0].length
+        });
+    }
+
+    if (matches.length === 0) {
+        // No URLs found, fallback to original comma split
+        return q.split(',').map(item => item.trim()).filter(Boolean);
+    }
+
+    const splitPoints = [0];
+    for (let i = 0; i < matches.length - 1; i++) {
+        const endOfCurrentUrl = matches[i].index + matches[i].length;
+        const startOfNextUrl = matches[i+1].index;
+        const midText = q.substring(endOfCurrentUrl, startOfNextUrl);
+        
+        const lastCommaIdx = midText.lastIndexOf(',');
+        if (lastCommaIdx !== -1) {
+            splitPoints.push(endOfCurrentUrl + lastCommaIdx);
+        } else {
+            const lastSpaceIdx = midText.lastIndexOf(' ');
+            if (lastSpaceIdx !== -1) {
+                splitPoints.push(endOfCurrentUrl + lastSpaceIdx);
+            } else {
+                splitPoints.push(endOfCurrentUrl);
+            }
+        }
+    }
+    splitPoints.push(q.length);
+
+    const items = [];
+    for (let i = 0; i < splitPoints.length - 1; i++) {
+        let itemText = q.substring(splitPoints[i], splitPoints[i+1]).trim();
+        itemText = itemText.replace(/^[\s,]+|[\s,]+$/g, '').trim();
+        if (itemText) {
+            items.push(itemText);
+        }
+    }
+    
+    return items;
+}
+
 // =========================================================================
 //  .download — Enhanced: supports multiple files, movie scraping, TMDB info
 // =========================================================================
@@ -453,8 +505,7 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply, abor
             );
         }
 
-        // Split by comma to support multiple files in a single command
-        const items = q.split(',').map(item => item.trim()).filter(Boolean);
+        const items = parseQueryToItems(q);
         await reply(`⏳ Found *${items.length}* download item(s) to process.`);
 
         const settings = loadSettings();
