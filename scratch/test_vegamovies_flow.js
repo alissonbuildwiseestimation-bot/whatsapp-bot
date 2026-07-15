@@ -1,16 +1,37 @@
 const scraper = require('../src/Utils/movie_scraper');
 
+function isLandingUrl(url) {
+    if (!url) return false;
+    const lower = url.toLowerCase();
+    return lower.includes('vcloud') || 
+           lower.includes('hubcloud') || 
+           lower.includes('gdflix') || 
+           lower.includes('fastdl') || 
+           lower.includes('filebee') || 
+           lower.includes('latent.click');
+}
+
 async function verifyFlow() {
-    console.log('--- VERIFYING VEGAMOVIES SCRAPER FUNCTIONS ---');
+    console.log('--- VERIFYING VEGAMOVIES AUTOMATED FALLBACK & EPISODE FLOW ---');
     try {
-        console.log('1. Testing scrapeAllPostLinks on Vikings series...');
-        const url = 'https://vegamovies.navy/download-see-you-at-work-tomorrow-season-1-hindi-dubbed-series-480p-720p-1080p-web-dl/';
-        const links = await scraper.scrapeAllPostLinks(url);
-        console.log(`Parsed ${links.length} total links.`);
+        console.log('1. Scraping post page: See You at Work Tomorrow...');
+        const postUrl = 'https://vegamovies.navy/download-see-you-at-work-tomorrow-season-1-hindi-dubbed-series-480p-720p-1080p-web-dl/';
+        const allLinks = await scraper.scrapeAllPostLinks(postUrl);
         
-        const validLinks = links.filter(l => {
+        // Filter out unrelated links (keep only V-Cloud redirect/landing pages)
+        const validLinks = allLinks.filter(l => {
             const lowerHref = l.href.toLowerCase();
-            return lowerHref.includes('nexdrive') || 
+            const lowerText = l.text.toLowerCase();
+            const lowerHeading = (l.heading || '').toLowerCase();
+            
+            const isVcloud = lowerHref.includes('vcloud') || 
+                             lowerText.includes('v-cloud') || 
+                             lowerText.includes('vcloud') || 
+                             lowerHeading.includes('v-cloud') || 
+                             lowerHeading.includes('vcloud');
+                             
+            return isVcloud && (
+                   lowerHref.includes('nexdrive') || 
                    lowerHref.includes('vgmlink') || 
                    lowerHref.includes('gdflix') || 
                    lowerHref.includes('fastdl') || 
@@ -19,42 +40,89 @@ async function verifyFlow() {
                    lowerHref.includes('vcloud') || 
                    lowerHref.includes('katdrive') || 
                    lowerHref.includes('kmhd') || 
-                   lowerHref.includes('fastdl.zip');
+                   lowerHref.includes('fastdl.zip')
+            );
         });
-        // Force the target link to be the exact V-Cloud pack page for testing
-        const targetLink = { text: 'Season 1 [E08 Added] {Hindi-Korean} 480p WEB-DL x264 [250MB/E]', href: 'https://nexdrive.fit/genxfm784776492707/' };
-        
-        if (targetLink) {
-            console.log(`\n2. Testing extractDirectDownloadLinks on selected link: ${targetLink.heading || targetLink.text}`);
-            const hosts = await scraper.extractDirectDownloadLinks(targetLink.href);
-            console.log(`Parsed ${hosts.length} direct host download links:`);
-            hosts.forEach((h, idx) => {
-                console.log(`  Host ${idx + 1}: ${h.text} [Episode: "${h.episode || 'N/A'}"] -> ${h.href}`);
+
+        console.log(`Parsed ${allLinks.length} total links, filtered down to ${validLinks.length} V-Cloud links:`);
+        validLinks.forEach((l, i) => {
+            const cleanText = l.text.replace(/⚡\s*/g, '').trim();
+            const label = l.heading 
+                ? `${l.heading} — *${cleanText}* (${l.resolution})` 
+                : `${cleanText} (${l.resolution})`;
+            console.log(`  Option ${i + 1}: ${label}`);
+        });
+
+        // Let's choose the 480p V-Cloud Pack option
+        const selectedLink = validLinks.find(l => l.text.includes('V-Cloud') && l.resolution === '480p') || validLinks[0];
+        console.log(`\nSelected resolution: ${selectedLink.heading} (${selectedLink.resolution})`);
+
+        // Resolve direct host links
+        console.log(`\n2. Extracting direct hosts from: ${selectedLink.href}`);
+        const directHosts = await scraper.extractDirectDownloadLinks(selectedLink.href);
+        console.log(`Found ${directHosts.length} direct hosts.`);
+
+        // Group hosts by episode
+        const episodesMap = new Map();
+        directHosts.forEach(h => {
+            const epLabel = h.episode;
+            if (epLabel) {
+                if (!episodesMap.has(epLabel)) {
+                    episodesMap.set(epLabel, []);
+                }
+                episodesMap.get(epLabel).push(h);
+            }
+        });
+
+        if (episodesMap.size > 0) {
+            console.log(`\n3. Grouped into ${episodesMap.size} Episodes:`);
+            const sortedEpisodes = Array.from(episodesMap.keys()).sort((a, b) => {
+                return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
             });
+            sortedEpisodes.forEach((ep, idx) => {
+                console.log(`  Episode ${idx + 1}: *${ep}*`);
+            });
+
+            // Simulate selecting Episode 1
+            const selectedEpisode = sortedEpisodes[0];
+            console.log(`\nSimulated selection: ${selectedEpisode}`);
             
-            // Filter options to only FSL, FSLv2, GDrive (G-Direct, Fastdl, Filepress), 10gbps
-            const filteredOptions = hosts.filter(host => {
-                const parentLower = (host.parentHost || '').toLowerCase();
-                const textLower = host.text.toLowerCase();
+            const episodeHosts = episodesMap.get(selectedEpisode);
+            const chosenHost = episodeHosts[0];
+            console.log(`Chosen Host Landing link: ${chosenHost.href}`);
+
+            // Simulate Fallback candidates lookup
+            let candidates = [];
+            if (isLandingUrl(chosenHost.href)) {
+                console.log(`\n4. Simulating sub-options extraction for: ${chosenHost.href}`);
+                const subOpts = await scraper.extractSubOptions(chosenHost.href);
                 
-                const isDirectLink = host.text === 'Direct Link';
-                const targetName = isDirectLink ? parentLower : textLower;
+                const opt10gbps = subOpts.find(opt => opt.text.toLowerCase().includes('10gbps'));
+                const optFslv2 = subOpts.find(opt => opt.text.toLowerCase().includes('fslv2'));
+                const optFsl = subOpts.find(opt => opt.text.toLowerCase().includes('fsl') && !opt.text.toLowerCase().includes('fslv2'));
                 
-                // Matches FSL/V-Cloud
-                const matchesFsl = targetName.includes('fsl') || targetName.includes('vcloud') || targetName.includes('v-cloud');
-                // Matches GDrive (fastdl, filepress, g-direct, filebee, etc.)
-                const matchesGdrive = targetName.includes('gdrive') || targetName.includes('g-drive') || targetName.includes('drive.google') || targetName.includes('fastdl') || targetName.includes('filepress') || targetName.includes('filebee') || targetName.includes('g-direct');
-                // Matches 10gbps
-                const matches10gbps = targetName.includes('10gbps');
-                
-                return matchesFsl || matchesGdrive || matches10gbps;
+                if (opt10gbps) candidates.push({ name: '10Gbps Server', href: opt10gbps.href });
+                if (optFslv2) candidates.push({ name: 'FSLv2 Server', href: optFslv2.href });
+                if (optFsl) candidates.push({ name: 'FSL Server', href: optFsl.href });
+            }
+
+            if (candidates.length === 0) {
+                candidates.push({ name: 'Direct Link', href: chosenHost.href });
+            }
+
+            console.log(`\nFallback candidates resolved:`);
+            candidates.forEach((cand, idx) => {
+                console.log(`  Candidate ${idx + 1} (${cand.name}): ${cand.href}`);
             });
-            
-            console.log(`\nFiltered down to ${filteredOptions.length} supported host options:`);
-            filteredOptions.forEach((h, idx) => {
-                console.log(`  Filtered Host ${idx + 1}: ${h.text} [Episode: "${h.episode || 'N/A'}"]`);
+
+            console.log(`\nFallback system will attempt downloading these in order:`);
+            candidates.forEach((cand, idx) => {
+                console.log(`  Attempt ${idx + 1}: ${cand.name}`);
             });
+        } else {
+            console.log('\n3. Single movie/file flow. Directly trigger fallback system.');
         }
+
         console.log('\n--- VERIFICATION COMPLETED ---');
     } catch(e) {
         console.error('Verification failed:', e.message);

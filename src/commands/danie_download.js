@@ -660,7 +660,6 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply, abor
         }
 
         const items = parseQueryToItems(q);
-        await reply(`⏳ Found *${items.length}* download item(s) to process.`);
 
         const settings = loadSettings();
         const isGroupMode = settings.mode === 'group' && settings.groupJid;
@@ -699,7 +698,6 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply, abor
 
             // If the URL points to a redirector/landing page, resolve it first
             if (isLandingUrl(url)) {
-                await reply(`⏳ Resolving redirect link: \`${url}\`...`);
                 try {
                     const resolved = await resolveVcloudLink(url, preferredServer);
                     if (resolved && resolved !== url) {
@@ -901,24 +899,16 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply, abor
                     finalFileName += '.' + ext;
                 }
 
-                await reply(`📤 Uploading file: *${finalFileName}* (${sizeInMB} MB)\n📍 To: ${destLabel}`);
-
                 await conn.sendMessage(destJid, {
                     document: { url: tempFilePath },
                     mimetype: mime,
                     fileName: finalFileName
                 }, destJid === from ? { quoted: mek } : {});
 
-                if (destJid !== from) {
-                    await reply(`✅ *${finalFileName}* (${sizeInMB} MB) successfully sent to the configured destination!`);
-                }
-
                 // Delete temporary file
                 fs.unlinkSync(tempFilePath);
             }
         }
-
-        await reply('✅ Processed all download items.');
 
     } catch (error) {
         if (error.message === 'Aborted') {
@@ -1303,6 +1293,96 @@ async function searchCommandHandler(conn, mek, from, senderJid, q, reply) {
         console.error('[DanieSearch] Search failed:', err.message);
         reply(`❌ Search failed: ${err.message}`);
     }
+async function executeFallbackDownload(conn, mek, from, senderJid, state, chosenHost, reply) {
+    const controller = new AbortController();
+    const activeDownloadRef = { filePath: null };
+    state.activeDownload = {
+        controller,
+        ref: activeDownloadRef
+    };
+
+    // Transition step back to select_resolution so the user can make another choice immediately
+    state.step = 'select_resolution';
+
+    // Start background download pipeline
+    (async () => {
+        try {
+            // Resolve sub-options for the chosen host (landing page URL)
+            let candidates = [];
+            
+            if (isLandingUrl(chosenHost.href)) {
+                console.log(`[DanieSearch] Resolving sub-options for landing url: ${chosenHost.href}`);
+                const subOpts = await extractSubOptions(chosenHost.href);
+                
+                // Find candidates in order of priority: 10gbps -> fslv2 -> fsl
+                const opt10gbps = subOpts.find(opt => opt.text.toLowerCase().includes('10gbps'));
+                const optFslv2 = subOpts.find(opt => opt.text.toLowerCase().includes('fslv2'));
+                const optFsl = subOpts.find(opt => opt.text.toLowerCase().includes('fsl') && !opt.text.toLowerCase().includes('fslv2'));
+                
+                if (opt10gbps) candidates.push({ name: '10Gbps Server', href: opt10gbps.href });
+                if (optFslv2) candidates.push({ name: 'FSLv2 Server', href: optFslv2.href });
+                if (optFsl) candidates.push({ name: 'FSL Server', href: optFsl.href });
+            }
+            
+            // If no specific candidates found or it's not a landing URL, try the direct host URL itself
+            if (candidates.length === 0) {
+                candidates.push({ name: 'Direct Link', href: chosenHost.href });
+            }
+
+            console.log(`[DanieSearch] Fallback system candidates:`, candidates.map(c => c.name));
+
+            // Prepare base title
+            let sanitizedTitle = (state.resolutionHeading || state.title || 'Movie')
+                .replace(/[:*?"<>|\\/]/g, '') // remove invalid filename chars
+                .trim();
+            
+            if (chosenHost.episode) {
+                sanitizedTitle = `${sanitizedTitle} ${chosenHost.episode}`;
+            }
+
+            let downloadSuccess = false;
+            let lastError = null;
+
+            for (let i = 0; i < candidates.length; i++) {
+                const cand = candidates[i];
+                const downloadQuery = `${sanitizedTitle} = ${cand.href}`;
+                console.log(`[DanieSearch] Fallback Attempt ${i + 1}: Trying ${cand.name}...`);
+                
+                try {
+                    await downloadCommandHandler(conn, mek, from, senderJid, downloadQuery, reply, controller.signal, activeDownloadRef, cand.name);
+                    downloadSuccess = true;
+                    console.log(`[DanieSearch] Fallback Attempt ${i + 1} (${cand.name}) succeeded!`);
+                    break; // Stop on first success!
+                } catch (err) {
+                    if (err.message === 'Aborted') {
+                        throw err; // Stop if aborted by the user
+                    }
+                    console.error(`[DanieSearch] Fallback Attempt ${i + 1} (${cand.name}) failed:`, err.message);
+                    lastError = err;
+                }
+            }
+
+            if (!downloadSuccess) {
+                throw lastError || new Error('All download links failed.');
+            }
+
+        } catch (err) {
+            if (err.message === 'Aborted') {
+                console.log('[DanieSearch] Background download successfully aborted.');
+            } else {
+                console.error('[DanieSearch] Background download failed:', err.message);
+                try {
+                    await reply(`❌ Failed to download: ${err.message}`);
+                } catch (replyErr) {
+                    console.error('[DanieSearch] Failed to send error reply:', replyErr.message);
+                }
+            }
+        } finally {
+            if (state.activeDownload && state.activeDownload.controller === controller) {
+                state.activeDownload = null;
+            }
+        }
+    })();
 }
 
 async function handleSearchReply(conn, mek, senderJid, text, reply) {
@@ -1329,10 +1409,20 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
             console.log(`[DanieSearch] Scraping post page: ${postUrl}`);
             const allLinks = await scrapeAllPostLinks(postUrl);
 
-            // Filter out unrelated links (keep only those that point to redirect/landing pages)
+            // Filter out unrelated links (keep only V-Cloud redirect/landing pages)
             const validLinks = allLinks.filter(l => {
                 const lowerHref = l.href.toLowerCase();
-                return lowerHref.includes('nexdrive') || 
+                const lowerText = l.text.toLowerCase();
+                const lowerHeading = (l.heading || '').toLowerCase();
+                
+                const isVcloud = lowerHref.includes('vcloud') || 
+                                 lowerText.includes('v-cloud') || 
+                                 lowerText.includes('vcloud') || 
+                                 lowerHeading.includes('v-cloud') || 
+                                 lowerHeading.includes('vcloud');
+                                 
+                return isVcloud && (
+                       lowerHref.includes('nexdrive') || 
                        lowerHref.includes('vgmlink') || 
                        lowerHref.includes('gdflix') || 
                        lowerHref.includes('fastdl') || 
@@ -1341,7 +1431,8 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
                        lowerHref.includes('vcloud') || 
                        lowerHref.includes('katdrive') || 
                        lowerHref.includes('kmhd') || 
-                       lowerHref.includes('fastdl.zip');
+                       lowerHref.includes('fastdl.zip')
+                );
             });
 
             if (validLinks.length === 0) {
@@ -1452,167 +1543,65 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
                 return reply(`❌ No direct download links could be resolved for this resolution.`);
             }
 
-            // Filter landing/redirect hosts
-            const landingHosts = directHosts.filter(h => isLandingUrl(h.href));
-
-            let mergedOptions = [];
-            
-            if (landingHosts.length > 0) {
-                const subOptsResults = await Promise.all(landingHosts.map(async (host) => {
-                    try {
-                        const subOpts = await extractSubOptions(host.href);
-                        return subOpts.map(opt => ({
-                            parentHost: host.text,
-                            text: opt.text,
-                            href: opt.href,
-                            episode: host.episode
-                        }));
-                    } catch (err) {
-                        console.error(`[DanieSearch] Failed to extract options for host ${host.text}:`, err.message);
-                        return [];
+            // Group hosts by episode to check if this is a series
+            const episodesMap = new Map();
+            directHosts.forEach(h => {
+                const epLabel = h.episode;
+                if (epLabel) {
+                    if (!episodesMap.has(epLabel)) {
+                        episodesMap.set(epLabel, []);
                     }
-                }));
-                mergedOptions = subOptsResults.flat();
-            }
+                    episodesMap.get(epLabel).push(h);
+                }
+            });
 
-            // Also include non-landing hosts directly
-            const nonLandingHosts = directHosts.filter(h => !isLandingUrl(h.href));
-            nonLandingHosts.forEach(host => {
-                mergedOptions.push({
-                    parentHost: host.text,
-                    text: 'Direct Link',
-                    href: host.href,
-                    episode: host.episode
+            if (episodesMap.size > 0) {
+                // TV Show episode selection!
+                state.step = 'select_episode';
+                state.resolutionHeading = selectedLink.heading || selectedLink.text;
+                state.episodesList = Array.from(episodesMap.keys()).sort((a, b) => {
+                    return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
                 });
-            });
+                state.episodesMap = Object.fromEntries(episodesMap);
+                state.messageId = null;
 
-            // Filter mergedOptions to only include: FSL, FSLv2, GDrive, and 10gbps
-            const filteredOptions = mergedOptions.filter(host => {
-                const parentLower = host.parentHost.toLowerCase();
-                const textLower = host.text.toLowerCase();
-                
-                // If it is a Direct Link, we determine the server type from parentHost.
-                // Otherwise (for sub-options), we determine it from the sub-option text (textLower).
-                const isDirectLink = host.text === 'Direct Link';
-                const targetName = isDirectLink ? parentLower : textLower;
-                
-                // Matches FSL/V-Cloud
-                const matchesFsl = targetName.includes('fsl') || targetName.includes('vcloud') || targetName.includes('v-cloud');
-                // Matches GDrive (fastdl, filepress, g-direct, filebee, etc.)
-                const matchesGdrive = targetName.includes('gdrive') || targetName.includes('g-drive') || targetName.includes('drive.google') || targetName.includes('fastdl') || targetName.includes('filepress') || targetName.includes('filebee') || targetName.includes('g-direct');
-                // Matches 10gbps
-                const matches10gbps = targetName.includes('10gbps');
-                
-                return matchesFsl || matchesGdrive || matches10gbps;
-            });
+                let episodeListText = `🌐 *Select an episode to download:* \n_${selectedLink.heading || selectedLink.text}_\n\n`;
+                state.episodesList.forEach((ep, idx) => {
+                    episodeListText += `  \`${idx + 1}\` — *${ep}*\n`;
+                });
+                episodeListText += `\n_Reply to this message with the episode number._`;
 
-            if (filteredOptions.length === 0) {
-                return reply(`❌ No supported servers (FSL, FSLv2, GDrive, 10gbps) resolved for this resolution.`);
-            }
-
-            // Update state to wait for sub-option selection
-            state.step = 'select_sub_option';
-            state.resolutionHeading = selectedLink.heading || selectedLink.text;
-            state.directHosts = filteredOptions;
-            state.messageId = null;
-
-            let serverListText = `🌐 *Select a download server for:* \n_${selectedLink.heading || selectedLink.text}_\n\n`;
-            filteredOptions.forEach((host, idx) => {
-                // Rename Fastdl to GDrive Link
-                let serverName = host.text;
-                if (serverName.toLowerCase().includes('fastdl')) {
-                    serverName = 'GDrive Link';
+                const sent = await reply(episodeListText);
+                if (sent && sent.key) {
+                    state.messageId = sent.key.id;
                 }
-                const match = serverName.match(/\[(.*?)\]/);
-                if (match && match[1]) {
-                    serverName = match[1];
-                }
-                
-                let cleanParent = host.parentHost.replace(/⚡\s*/, '').trim();
-                
-                // Format with episode name if available
-                const epPrefix = host.episode ? `*${host.episode}* — ` : '';
-                serverListText += `  \`${idx + 1}\` — ${epPrefix}${cleanParent} (${serverName})\n`;
-            });
-            serverListText += `\n_Reply to this message with the server number to start download/upload._`;
-
-            const sent = await reply(serverListText);
-            if (sent && sent.key) {
-                state.messageId = sent.key.id;
+            } else {
+                // Movie or single file! Directly execute fallback download on the first host
+                const chosenHost = directHosts[0];
+                await executeFallbackDownload(conn, mek, from, senderJid, state, chosenHost, reply);
             }
         } catch (err) {
             console.error('[DanieSearch] Failed to resolve hosts:', err.message);
             reply(`❌ Failed to resolve download hosts: ${err.message}`);
         }
-    } else if (state.step === 'select_sub_option') {
-        const hosts = state.directHosts || [];
-        if (isNaN(num) || num < 1 || num > hosts.length) {
-            return reply(`❌ Invalid server number. Reply with a number from 1 to ${hosts.length}.`);
+    } else if (state.step === 'select_episode') {
+        const epList = state.episodesList || [];
+        if (isNaN(num) || num < 1 || num > epList.length) {
+            return reply(`❌ Invalid episode number. Reply with a number from 1 to ${epList.length}.`);
         }
 
-        // If there's an active download running, abort it (safety)
-        if (state.activeDownload) {
-            try {
-                state.activeDownload.controller.abort();
-                if (state.activeDownload.ref && state.activeDownload.ref.filePath) {
-                    const fp = state.activeDownload.ref.filePath;
-                    if (fs.existsSync(fp)) fs.unlinkSync(fp);
-                }
-            } catch (err) {}
-            state.activeDownload = null;
+        const selectedEpisode = epList[num - 1];
+        const episodeHosts = (state.episodesMap || {})[selectedEpisode] || [];
+
+        if (episodeHosts.length === 0) {
+            return reply(`❌ No download hosts found for this episode.`);
         }
 
-        const chosenHost = hosts[num - 1];
-        
-        // Setup abort controller and references
-        const controller = new AbortController();
-        const activeDownloadRef = { filePath: null };
-        state.activeDownload = {
-            controller,
-            ref: activeDownloadRef
-        };
+        // Choose the first host under this episode (the landing link)
+        const chosenHost = episodeHosts[0];
 
-        // Transition step back to select_resolution so the user can make another choice immediately
-        state.step = 'select_resolution';
-
-        // Resolve direct link and trigger downloadCommandHandler asynchronously (in the background)
-        (async () => {
-            try {
-                let finalDirectUrl = chosenHost.href;
-                console.log(`[DanieSearch] Chosen server direct link: ${finalDirectUrl}`);
-
-                // Prepare download query format: "Movie_Title = URL"
-                let sanitizedTitle = (state.resolutionHeading || state.title || 'Movie')
-                    .replace(/[:*?"<>|\\/]/g, '') // remove invalid filename chars
-                    .trim();
-                
-                // Append episode label if available
-                if (chosenHost.episode) {
-                    sanitizedTitle = `${sanitizedTitle} ${chosenHost.episode}`;
-                }
-                
-                const downloadQuery = `${sanitizedTitle} = ${finalDirectUrl}`;
-                console.log(`[DanieSearch] Handing over background query: "${downloadQuery}"`);
-
-                await downloadCommandHandler(conn, mek, from, senderJid, downloadQuery, reply, controller.signal, activeDownloadRef, chosenHost.text);
-            } catch (err) {
-                if (err.message === 'Aborted') {
-                    console.log('[DanieSearch] Background download successfully aborted.');
-                } else {
-                    console.error('[DanieSearch] Background download failed:', err.message);
-                    try {
-                        await reply(`❌ Failed to process download for server *${chosenHost.text}*: ${err.message}`);
-                    } catch (replyErr) {
-                        console.error('[DanieSearch] Failed to send error reply (connection likely closed):', replyErr.message);
-                    }
-                }
-            } finally {
-                // Clear active download if it was this controller
-                if (state.activeDownload && state.activeDownload.controller === controller) {
-                    state.activeDownload = null;
-                }
-            }
-        })();
+        // Trigger fallback download pipeline
+        await executeFallbackDownload(conn, mek, from, senderJid, state, chosenHost, reply);
     }
 }
 
