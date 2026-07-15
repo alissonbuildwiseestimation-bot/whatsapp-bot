@@ -1293,6 +1293,8 @@ async function searchCommandHandler(conn, mek, from, senderJid, q, reply) {
         console.error('[DanieSearch] Search failed:', err.message);
         reply(`❌ Search failed: ${err.message}`);
     }
+}
+
 async function executeFallbackDownload(conn, mek, from, senderJid, state, chosenHost, reply) {
     const controller = new AbortController();
     const activeDownloadRef = { filePath: null };
