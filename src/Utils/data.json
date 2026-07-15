@@ -422,5 +422,29 @@
         "cmd": ".ping"
       }
     ]
+  },
+  {
+    "3EB003E4F0524C00B1E976": [
+      {
+        "cmdId": "1",
+        "cmd": ".menu"
+      },
+      {
+        "cmdId": "2",
+        "cmd": ".ping"
+      }
+    ]
+  },
+  {
+    "3EB06FA820366D85D01A01": [
+      {
+        "cmdId": "1",
+        "cmd": ".menu"
+      },
+      {
+        "cmdId": "2",
+        "cmd": ".ping"
+      }
+    ]
   }
 ]
