@@ -3,7 +3,7 @@ const cheerio = require('cheerio');
 const { extractSubOptions } = require('../src/Utils/movie_scraper');
 
 async function test() {
-    const url = 'https://vcloud.zip/sdn0rn361cywds2';
+    const url = 'https://vcloud.zip/auy9uw4zrywha5n';
     try {
         console.log('Resolving sub-options for:', url);
         const options = await extractSubOptions(url);

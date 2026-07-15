@@ -8,13 +8,15 @@ const HEADERS = {
 };
 
 async function inspectNexdrive() {
-    const url = 'https://nexdrive.fit/genxfm784776375789/';
+    const url = 'https://nexdrive.fit/genxfm784776492707/';
     try {
         const response = await axios.get(url, { headers: HEADERS });
         const $ = cheerio.load(response.data);
         
         console.log(`Nexdrive page status: ${response.status}`);
         console.log(`Nexdrive page size: ${response.data.length} bytes`);
+        console.log(`Title: "${$('title').text().trim()}"`);
+        console.log(`H1: "${$('h1').text().trim()}"`);
         
         console.log('All links on Nexdrive landing page:');
         $('a[href]').each((i, el) => {

@@ -549,59 +549,87 @@ async function scrapeAllPostLinks(url) {
 /**
  * Helper to find episode text from preceding headings or surrounding elements
  */
-function findEpisodeText($, el) {
-    // 1. Check if the text itself or its parent has episode text
+function findEpisodeText($, el, pageTitle) {
+    let seasonPrefix = '';
+    if (pageTitle) {
+        const seasonMatch = pageTitle.match(/\((S\d+)\)/i) || pageTitle.match(/Season\s*(\d+)/i) || pageTitle.match(/\bs(\d+)\b/i);
+        if (seasonMatch) {
+            const matchedVal = seasonMatch[1] || seasonMatch[0];
+            if (/^S\d+/i.test(matchedVal)) {
+                seasonPrefix = matchedVal.toUpperCase();
+            } else {
+                const num = parseInt(matchedVal.replace(/\D/g, ''), 10);
+                if (!isNaN(num)) {
+                    seasonPrefix = `S${String(num).padStart(2, '0')}`;
+                }
+            }
+        }
+    }
+
+    // Find raw episode text
+    let episodeNum = null;
     const selfText = ($(el).text().trim() + ' ' + $(el).parent().text().trim()).toLowerCase();
     const selfMatch = selfText.match(/episode[s]?[:]?\s*(\d+)/i);
     if (selfMatch) {
-        return `Episode ${parseInt(selfMatch[1], 10)}`;
+        episodeNum = parseInt(selfMatch[1], 10);
     }
 
-    // 2. Check if there's a table cell in the same row
-    const row = $(el).closest('tr');
-    if (row.length) {
-        // Look at the text of the first td in this row
-        const firstTd = row.find('td').first().text().trim();
-        const firstTdMatch = firstTd.match(/episode[s]?[:]?\s*(\d+)/i);
-        if (firstTdMatch) {
-            return `Episode ${parseInt(firstTdMatch[1], 10)}`;
-        }
-        // Or if the first td contains a number
-        if (/^\d+$/.test(firstTd)) {
-            return `Episode ${parseInt(firstTd, 10)}`;
+    if (episodeNum === null) {
+        const row = $(el).closest('tr');
+        if (row.length) {
+            const firstTd = row.find('td').first().text().trim();
+            const firstTdMatch = firstTd.match(/episode[s]?[:]?\s*(\d+)/i);
+            if (firstTdMatch) {
+                episodeNum = parseInt(firstTdMatch[1], 10);
+            } else if (/^\d+$/.test(firstTd)) {
+                episodeNum = parseInt(firstTd, 10);
+            }
         }
     }
 
-    // 3. Check preceding elements
-    let curr = $(el).closest('p, div, td, tr, li');
-    let found = false;
-    let episodeText = '';
-    while (curr.length && !found) {
-        let sib = curr.prev();
-        while (sib.length) {
-            const name = sib[0].name.toLowerCase();
-            const sibText = sib.text().trim();
-            if (/^h[1-6]$/.test(name) || (name === 'p' && sibText.toLowerCase().includes('episode'))) {
-                if (sibText) {
-                    episodeText = sibText;
-                    found = true;
-                    break;
+    if (episodeNum === null) {
+        let curr = $(el).closest('p, div, td, tr, li');
+        let found = false;
+        let episodeText = '';
+        while (curr.length && !found) {
+            let sib = curr.prev();
+            while (sib.length) {
+                const name = sib[0].name.toLowerCase();
+                const sibText = sib.text().trim();
+                if (/^h[1-6]$/.test(name) || (name === 'p' && sibText.toLowerCase().includes('episode'))) {
+                    if (sibText) {
+                        episodeText = sibText;
+                        found = true;
+                        break;
+                    }
+                }
+                sib = sib.prev();
+            }
+            curr = curr.parent();
+        }
+
+        if (episodeText) {
+            const matchEp = episodeText.match(/episode[s]?[:]?\s*(\d+)/i);
+            if (matchEp) {
+                episodeNum = parseInt(matchEp[1], 10);
+            } else {
+                const cleanText = episodeText.replace(/^[-:\s]+|[-:\s]+$/g, '').trim();
+                const matchNum = cleanText.match(/\b(\d+)\b/);
+                if (matchNum) {
+                    episodeNum = parseInt(matchNum[1], 10);
+                } else {
+                    return seasonPrefix ? `${seasonPrefix} - ${cleanText}` : cleanText;
                 }
             }
-            sib = sib.prev();
         }
-        curr = curr.parent();
     }
 
-    if (episodeText) {
-        const matchEp = episodeText.match(/episode[s]?[:]?\s*(\d+)/i);
-        if (matchEp) {
-            return `Episode ${parseInt(matchEp[1], 10)}`;
-        }
-        // Clean up common decoration like "-:Episodes: 04:-"
-        return episodeText.replace(/^[-:\s]+|[-:\s]+$/g, '').trim();
+    if (episodeNum !== null) {
+        const epStr = `E${String(episodeNum).padStart(2, '0')}`;
+        return seasonPrefix ? `${seasonPrefix}${epStr}` : `Episode ${episodeNum}`;
     }
-    return '';
+
+    return seasonPrefix ? `${seasonPrefix}` : '';
 }
 
 /**
@@ -612,6 +640,8 @@ async function extractDirectDownloadLinks(url) {
         console.log('[MovieScraper] Fetching landing page to extract hosts:', url);
         const res = await axios.get(url, { headers: HEADERS, timeout: 15000 });
         const $ = cheerio.load(res.data);
+        
+        const pageTitle = $('title').text() || $('h1').text() || '';
         
         const hosts = [];
         const keywords = ['fastdl', 'vcloud', 'filebee', 'gofile', 'vikingfile', 'megaup', 'gdflix', 'katdrive', 'kmhd', 'hubcloud', 'pixeldrain', 'drive.google', 'mega.nz', 'yodrive', 'shared'];
@@ -646,7 +676,7 @@ async function extractDirectDownloadLinks(url) {
                     } catch(e) {}
                 }
                 
-                const episodeText = findEpisodeText($, el);
+                const episodeText = findEpisodeText($, el, pageTitle);
                 
                 // Avoid duplicates
                 if (!hosts.some(h => h.href === href)) {

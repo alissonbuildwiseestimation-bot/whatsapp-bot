@@ -1488,12 +1488,17 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
                 const parentLower = host.parentHost.toLowerCase();
                 const textLower = host.text.toLowerCase();
                 
+                // If it is a Direct Link, we determine the server type from parentHost.
+                // Otherwise (for sub-options), we determine it from the sub-option text (textLower).
+                const isDirectLink = host.text === 'Direct Link';
+                const targetName = isDirectLink ? parentLower : textLower;
+                
                 // Matches FSL/V-Cloud
-                const matchesFsl = parentLower.includes('v-cloud') || parentLower.includes('vcloud') || textLower.includes('fsl') || textLower.includes('vcloud') || textLower.includes('v-cloud');
+                const matchesFsl = targetName.includes('fsl') || targetName.includes('vcloud') || targetName.includes('v-cloud');
                 // Matches GDrive (fastdl, filepress, g-direct, filebee, etc.)
-                const matchesGdrive = parentLower.includes('g-direct') || parentLower.includes('filepress') || parentLower.includes('gdrive') || parentLower.includes('fastdl') || parentLower.includes('filebee') || textLower.includes('gdrive') || textLower.includes('drive') || textLower.includes('fastdl') || textLower.includes('filepress');
+                const matchesGdrive = targetName.includes('gdrive') || targetName.includes('g-drive') || targetName.includes('drive.google') || targetName.includes('fastdl') || targetName.includes('filepress') || targetName.includes('filebee') || targetName.includes('g-direct');
                 // Matches 10gbps
-                const matches10gbps = parentLower.includes('10gbps') || textLower.includes('10gbps');
+                const matches10gbps = targetName.includes('10gbps');
                 
                 return matchesFsl || matchesGdrive || matches10gbps;
             });
