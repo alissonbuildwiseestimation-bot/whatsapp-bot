@@ -644,7 +644,7 @@ function parseQueryToItems(q) {
 // =========================================================================
 //  .download — Enhanced: supports multiple files, movie scraping, TMDB info
 // =========================================================================
-async function downloadCommandHandler(conn, mek, from, senderJid, q, reply, abortSignal = null, activeDownloadRef = null, preferredServer = null) {
+async function downloadCommandHandler(conn, mek, from, senderJid, q, reply, abortSignal = null, activeDownloadRef = null, preferredServer = null, silentErrors = false) {
     console.log("=== DOWNLOAD COMMAND TRIGGERED ===");
     console.log("q:", q);
     try {
@@ -913,14 +913,17 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply, abor
     } catch (error) {
         if (error.message === 'Aborted') {
             console.log('[DanieDownload] Download task aborted.');
-            return;
+            throw error;
         }
         console.error('Download command error:', error);
-        try {
-            await reply(`❌ Failed to download/upload file: ${error.message}`);
-        } catch (replyErr) {
-            console.error('[DanieDownload] Failed to send error reply (connection likely closed):', replyErr.message);
+        if (!silentErrors) {
+            try {
+                await reply(`❌ Failed to download/upload file: ${error.message}`);
+            } catch (replyErr) {
+                console.error('[DanieDownload] Failed to send error reply (connection likely closed):', replyErr.message);
+            }
         }
+        throw error;
     }
 }
 
@@ -1351,7 +1354,7 @@ async function executeFallbackDownload(conn, mek, from, senderJid, state, chosen
                 console.log(`[DanieSearch] Fallback Attempt ${i + 1}: Trying ${cand.name}...`);
                 
                 try {
-                    await downloadCommandHandler(conn, mek, from, senderJid, downloadQuery, reply, controller.signal, activeDownloadRef, cand.name);
+                    await downloadCommandHandler(conn, mek, from, senderJid, downloadQuery, reply, controller.signal, activeDownloadRef, cand.name, true);
                     downloadSuccess = true;
                     console.log(`[DanieSearch] Fallback Attempt ${i + 1} (${cand.name}) succeeded!`);
                     break; // Stop on first success!
