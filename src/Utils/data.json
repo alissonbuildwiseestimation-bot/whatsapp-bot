@@ -166,5 +166,17 @@
         "cmd": ".ping"
       }
     ]
+  },
+  {
+    "3EB07FCB50FAD5F157F37D": [
+      {
+        "cmdId": "1",
+        "cmd": ".menu"
+      },
+      {
+        "cmdId": "2",
+        "cmd": ".ping"
+      }
+    ]
   }
 ]
