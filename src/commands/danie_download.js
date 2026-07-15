@@ -473,51 +473,7 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply) {
                 await reply(`⏳ Processing file *${i + 1}/${items.length}*...\n📍 Target: ${targetFilename || 'Auto-detect'}`);
             }
 
-            // 1. Movie Page Autodetect & Scrape for Vegamovies, Rogmovies, or HDHub4u (checks domain only to avoid matching filenames in paths)
-            let isMoviePage = false;
-            try {
-                const hostname = new URL(url).hostname.toLowerCase();
-                isMoviePage = ['vegamovies', 'rogmovies', 'hdhub4u'].some(domain => hostname.includes(domain));
-            } catch (err) {}
-            if (isMoviePage) {
-                try {
-                    await reply(`🔍 Resolving movie/series download link from page...\n🔗 ${url}`);
-                    
-                    // Scrape the detail page
-                    const scraped = await scrapePostPage(url);
-                    console.log('[DanieDownload] Scraped details:', scraped);
-                    
-                    // Follow landing redirects to find V-Cloud/HubCloud
-                    const landingUrl = await resolveLandingLink(scraped.chosenUrl);
-                    let directUrl = landingUrl;
-                    
-                    if (landingUrl.includes('vcloud') || landingUrl.includes('hubcloud') || landingUrl.includes('gdflix')) {
-                        directUrl = await resolveVcloudLink(landingUrl);
-                    }
-                    
-                    let displayFilename = `${scraped.title} (${scraped.year || 'N/A'})`;
-                    if (scraped.season !== null) {
-                        displayFilename += ` S${String(scraped.season).padStart(2, '0')}`;
-                        if (scraped.episode !== null) {
-                            displayFilename += `E${String(scraped.episode).padStart(2, '0')}`;
-                        }
-                    }
-                    displayFilename += ` [${scraped.resolution}]`;
-                    
-                    // Redirect downloader to resolved direct link
-                    url = directUrl;
-                    targetFilename = displayFilename;
-                    
-                } catch (err) {
-                    await reply(`❌ Movie scraper failed: ${err.message}\nUsing original link as fallback.`);
-                }
-            } else if (url.includes('vcloud') || url.includes('hubcloud') || url.includes('gdflix') || url.includes('fastdl') || url.includes('filebee')) {
-                try {
-                    url = await resolveVcloudLink(url);
-                } catch (err) {
-                    console.error('[DownloadCommand] Vcloud resolution failed:', err.message);
-                }
-            }
+            // Direct download bypass (no movie scraping/resolution)
 
             // Basic URL validation
             if (!url.startsWith('http://') && !url.startsWith('https://')) {
@@ -630,6 +586,13 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply) {
                               ['application/zip', 'application/x-tar', 'application/x-rar-compressed', 'application/x-gzip', 'application/x-zip-compressed'].includes(mime.toLowerCase());
 
             if (isArchive) {
+                let FolderName = '';
+                if (targetFilename) {
+                    FolderName = cleanFileName(targetFilename);
+                } else {
+                    FolderName = cleanFileName(tempFilename);
+                }
+
                 await reply(`📦 Archive detected: *${tempFilename}*. Extracting files...`);
                 const targetDir = path.join(__dirname, 'extracted_' + Date.now());
                 try {
@@ -638,6 +601,20 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply) {
                     // Traverse and find files
                     const filesToUpload = getAllFiles(targetDir);
                     console.log(`[DanieDownload] Extracted files:`, filesToUpload);
+
+                    // Detect shared root folder inside zip
+                    let archiveRootFolder = null;
+                    if (filesToUpload.length > 0) {
+                        const normalizedFiles = filesToUpload.map(f => path.relative(targetDir, f).replace(/\\/g, '/'));
+                        const firstRelative = normalizedFiles[0];
+                        const firstRoot = firstRelative.split('/')[0];
+                        const allShareRoot = normalizedFiles.every(f => {
+                            return f.split('/')[0] === firstRoot && f.split('/').length > 1;
+                        });
+                        if (allShareRoot) {
+                            archiveRootFolder = firstRoot;
+                        }
+                    }
                     
                     let uploadedCount = 0;
                     for (const filePath of filesToUpload) {
@@ -666,10 +643,19 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply) {
                             }
                         } catch (err) {}
                         
-                        // Rename branding keywords
-                        let finalFileName = baseName.replace(/hdhub4u/gi, 'DANIEWATCH')
-                                                    .replace(/vegamovies/gi, 'DANIEWATCH')
-                                                    .replace(/rogmovies/gi, 'DANIEWATCH');
+                        // Determine relative path and apply FolderName
+                        let relPath = path.relative(targetDir, filePath).replace(/\\/g, '/');
+                        if (archiveRootFolder) {
+                            // Strip root folder
+                            const prefixLength = archiveRootFolder.length + 1;
+                            relPath = relPath.substring(prefixLength);
+                        }
+
+                        let finalFileNamePath = path.join(FolderName, relPath);
+                        let finalFileName = finalFileNamePath.replace(/\\/g, '/')
+                                                            .replace(/hdhub4u/gi, 'DANIEWATCH')
+                                                            .replace(/vegamovies/gi, 'DANIEWATCH')
+                                                            .replace(/rogmovies/gi, 'DANIEWATCH');
                         
                         if (fileExt && !finalFileName.toLowerCase().endsWith('.' + fileExt.toLowerCase())) {
                             finalFileName += '.' + fileExt;
@@ -703,11 +689,17 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply) {
                 }
             } else {
                 // Non-archive file upload
-                const cleanDisplayFilename = cleanFileName(tempFilename);
-                let finalFileName = cleanDisplayFilename.replace(/hdhub4u/gi, 'DANIEWATCH')
-                                                        .replace(/vegamovies/gi, 'DANIEWATCH')
-                                                        .replace(/rogmovies/gi, 'DANIEWATCH');
-                if (!finalFileName.toLowerCase().endsWith('.' + ext.toLowerCase())) {
+                let displayName = '';
+                if (targetFilename) {
+                    displayName = cleanFileName(targetFilename);
+                } else {
+                    displayName = cleanFileName(tempFilename);
+                }
+
+                let finalFileName = displayName.replace(/hdhub4u/gi, 'DANIEWATCH')
+                                                .replace(/vegamovies/gi, 'DANIEWATCH')
+                                                .replace(/rogmovies/gi, 'DANIEWATCH');
+                if (ext && !finalFileName.toLowerCase().endsWith('.' + ext.toLowerCase())) {
                     finalFileName += '.' + ext;
                 }
 
