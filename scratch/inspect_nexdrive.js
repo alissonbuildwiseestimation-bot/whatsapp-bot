@@ -8,7 +8,7 @@ const HEADERS = {
 };
 
 async function inspectNexdrive() {
-    const url = 'https://nexdrive.fit/genxfm784776492707/';
+    const url = 'https://nexdrive.fit/genxfm784776492714/';
     try {
         const response = await axios.get(url, { headers: HEADERS });
         const $ = cheerio.load(response.data);

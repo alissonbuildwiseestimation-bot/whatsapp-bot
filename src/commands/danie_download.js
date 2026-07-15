@@ -1361,7 +1361,10 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
 
             let listText = `🎬 *${selectedMovie.title}*\n\nSelect a resolution to download:\n\n`;
             validLinks.forEach((l, i) => {
-                const label = l.heading ? `${l.heading} (${l.resolution})` : `${l.text} (${l.resolution})`;
+                const cleanText = l.text.replace(/⚡\s*/g, '').trim();
+                const label = l.heading 
+                    ? `${l.heading} — *${cleanText}* (${l.resolution})` 
+                    : `${cleanText} (${l.resolution})`;
                 listText += `  \`${i + 1}\` — ${label}\n`;
             });
             listText += `\n_Reply with the number of the resolution you want._`;

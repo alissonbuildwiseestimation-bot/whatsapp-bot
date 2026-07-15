@@ -3,7 +3,7 @@ const cheerio = require('cheerio');
 const scraper = require('../src/Utils/movie_scraper');
 
 async function testPostLinks() {
-    const url = 'https://vegamovies.mom/deadpool-2016-hindi-dubbed-Watch-online-full-movie/';
+    const url = 'https://vegamovies.navy/download-see-you-at-work-tomorrow-season-1-hindi-dubbed-series-480p-720p-1080p-web-dl/';
     console.log(`Scraping post page: ${url}`);
     try {
         const response = await axios.get(url, {
