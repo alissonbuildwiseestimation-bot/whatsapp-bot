@@ -570,5 +570,65 @@
         "cmd": ".ping"
       }
     ]
+  },
+  {
+    "3EB06C714E052279B0A2DB": [
+      {
+        "cmdId": "1",
+        "cmd": ".menu"
+      },
+      {
+        "cmdId": "2",
+        "cmd": ".ping"
+      }
+    ]
+  },
+  {
+    "3EB002C3221ED9D92BE0E1": [
+      {
+        "cmdId": "1",
+        "cmd": ".list 1"
+      },
+      {
+        "cmdId": "2",
+        "cmd": ".list 2"
+      },
+      {
+        "cmdId": "3",
+        "cmd": ".list 3"
+      },
+      {
+        "cmdId": "4",
+        "cmd": ".list 4"
+      },
+      {
+        "cmdId": "5",
+        "cmd": ".list 5"
+      },
+      {
+        "cmdId": "6",
+        "cmd": ".list 6"
+      },
+      {
+        "cmdId": "7",
+        "cmd": ".list 7"
+      },
+      {
+        "cmdId": "8",
+        "cmd": ".list 8"
+      },
+      {
+        "cmdId": "9",
+        "cmd": ".list 9"
+      },
+      {
+        "cmdId": "10",
+        "cmd": ".list 10"
+      },
+      {
+        "cmdId": "11",
+        "cmd": ".list 11"
+      }
+    ]
   }
 ]
