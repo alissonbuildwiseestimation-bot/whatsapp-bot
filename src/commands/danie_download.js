@@ -64,7 +64,13 @@ function cleanJunkWords(text) {
 function generateCustomFileName(state, primaryHost) {
     let postTitle = state.title || '';
     const resolution = state.selectedResolution || '';
-    const episode = primaryHost ? primaryHost.episode : '';
+    let episode = primaryHost ? primaryHost.episode : '';
+
+    // Sanitize episode — reject disclaimers that got misidentified as episode labels
+    if (episode && /download\s+manager|instant\s+download|note\s*:/i.test(episode)) {
+        console.log(`[DanieFileName] Rejecting junk episode label: "${episode}"`);
+        episode = '';
+    }
 
     console.log(`[DanieFileName] Input: title="${postTitle}", resolution="${resolution}", episode="${episode}"`);
 
