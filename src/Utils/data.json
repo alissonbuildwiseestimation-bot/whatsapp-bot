@@ -642,5 +642,17 @@
         "cmd": ".ping"
       }
     ]
+  },
+  {
+    "3EB0F8A94C71DE5C767A8D": [
+      {
+        "cmdId": "1",
+        "cmd": ".menu"
+      },
+      {
+        "cmdId": "2",
+        "cmd": ".ping"
+      }
+    ]
   }
 ]
