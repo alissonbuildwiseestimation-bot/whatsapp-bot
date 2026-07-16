@@ -1579,30 +1579,30 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
             console.log(`[DanieSearch] Scraping post page: ${postUrl}`);
             const allLinks = await scrapeAllPostLinks(postUrl);
 
-            // Filter out unrelated links (keep only V-Cloud redirect/landing pages)
+            // Filter out unrelated links (keep only V-Cloud or landing page domains)
             const validLinks = allLinks.filter(l => {
                 const lowerHref = l.href.toLowerCase();
                 const lowerText = l.text.toLowerCase();
                 const lowerHeading = (l.heading || '').toLowerCase();
                 
-                const isVcloud = lowerHref.includes('vcloud') || 
-                                 lowerText.includes('v-cloud') || 
-                                 lowerText.includes('vcloud') || 
-                                 lowerHeading.includes('v-cloud') || 
-                                 lowerHeading.includes('vcloud');
-                                 
-                return isVcloud && (
-                       lowerHref.includes('nexdrive') || 
-                       lowerHref.includes('vgmlink') || 
-                       lowerHref.includes('gdflix') || 
-                       lowerHref.includes('fastdl') || 
-                       lowerHref.includes('filebee') || 
-                       lowerHref.includes('hubcloud') || 
-                       lowerHref.includes('vcloud') || 
-                       lowerHref.includes('katdrive') || 
-                       lowerHref.includes('kmhd') || 
-                       lowerHref.includes('fastdl.zip')
-                );
+                const isLandingDomain = lowerHref.includes('nexdrive') || 
+                                        lowerHref.includes('vgmlink') || 
+                                        lowerHref.includes('gdflix') || 
+                                        lowerHref.includes('fastdl') || 
+                                        lowerHref.includes('filebee') || 
+                                        lowerHref.includes('hubcloud') || 
+                                        lowerHref.includes('vcloud') || 
+                                        lowerHref.includes('katdrive') || 
+                                        lowerHref.includes('kmhd') || 
+                                        lowerHref.includes('fastdl.zip');
+                                        
+                const isVcloudKeyword = lowerHref.includes('vcloud') || 
+                                         lowerText.includes('v-cloud') || 
+                                         lowerText.includes('vcloud') || 
+                                         lowerHeading.includes('v-cloud') || 
+                                         lowerHeading.includes('vcloud');
+                                         
+                return (isLandingDomain || isVcloudKeyword) && l.resolution !== 'Unknown';
             });
 
             if (validLinks.length === 0) {
