@@ -66,58 +66,33 @@ function generateCustomFileName(state, primaryHost) {
     const resolution = state.selectedResolution || '';
     const episode = primaryHost ? primaryHost.episode : '';
 
+    console.log(`[DanieFileName] Input: title="${postTitle}", resolution="${resolution}", episode="${episode}"`);
+
     // Remove "Download" from start
     postTitle = postTitle.replace(/^download\s+/i, '').trim();
 
-    // Determine if it is a TV show
-    const hasEpisode = !!episode;
-    const isTvShow = hasEpisode || /season\s*\d+|series/i.test(postTitle);
+    // Remove common disclaimer/note prefixes
+    postTitle = postTitle.replace(/note\s*[:\-–]\s*use\s+download\s+manager.*?instant\s+download[!.\s]*/gi, '').trim();
 
-    let cleanTitle = '';
+    // Remove invalid filename characters
+    postTitle = postTitle.replace(/[:*?"<>|\\\/]/g, '').trim();
 
-    if (isTvShow) {
-        // Extract up to the season
-        // E.g. "See You at Work Tomorrow (Season 1) ..." or "See You at Work Tomorrow Season 1 ..."
-        const seasonMatch = postTitle.match(/^(.*?)\s*\(?\s*(season\s*\d+)\b\s*\)?/i);
-        if (seasonMatch) {
-            const cleanPrefix = cleanJunkWords(seasonMatch[1]).trim();
-            cleanTitle = `${cleanPrefix} ${seasonMatch[2].trim()}`;
-        } else {
-            cleanTitle = cleanJunkWords(postTitle);
-        }
-    } else {
-        // For movies: keep up to and including the year
-        const yearMatch = postTitle.match(/^(.*?)\s*\(?\s*\b((19|20)\d{2})\b\s*\)?/i);
-        if (yearMatch) {
-            const cleanPrefix = cleanJunkWords(yearMatch[1]).trim();
-            cleanTitle = `${cleanPrefix} ${yearMatch[2].trim()}`;
-        } else {
-            cleanTitle = cleanJunkWords(postTitle);
-        }
+    // Clean up double spaces
+    postTitle = postTitle.replace(/\s+/g, ' ').trim();
+
+    // Build final name: [Episode] PostTitle Resolution
+    const parts = [];
+    if (episode) {
+        parts.push(episode.trim());
+    }
+    parts.push(postTitle);
+    if (resolution) {
+        parts.push(resolution.trim());
     }
 
-    // Clean up any remaining double spaces
-    cleanTitle = cleanTitle.replace(/\s+/g, ' ').trim();
-
-    // Format the final name
-    if (isTvShow) {
-        const parts = [];
-        if (episode) {
-            // Place episode code at the very beginning
-            parts.push(episode.trim());
-        }
-        parts.push(cleanTitle);
-        if (resolution) {
-            parts.push(resolution.trim());
-        }
-        return parts.join(' ');
-    } else {
-        const parts = [cleanTitle];
-        if (resolution) {
-            parts.push(resolution.trim());
-        }
-        return parts.join(' ');
-    }
+    const result = parts.join(' ');
+    console.log(`[DanieFileName] Output: "${result}"`);
+    return result;
 }
 
 const { execSync } = require('child_process');
