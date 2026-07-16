@@ -74,18 +74,42 @@ function generateCustomFileName(state, primaryHost) {
     // Remove common disclaimer/note prefixes
     postTitle = postTitle.replace(/note\s*[:\-–]\s*use\s+download\s+manager.*?instant\s+download[!.\s]*/gi, '').trim();
 
+    // Determine if it is a TV show
+    const hasEpisode = !!episode;
+    const isTvShow = hasEpisode || /season\s*\d+|series/i.test(postTitle);
+
+    let cleanTitle = '';
+
+    if (isTvShow) {
+        // Keep everything up to and including "Season N" (with optional parentheses)
+        const seasonMatch = postTitle.match(/^(.*?\(?\s*season\s*\d+\s*\)?)/i);
+        if (seasonMatch) {
+            cleanTitle = seasonMatch[1].trim();
+        } else {
+            // No season found — use full title
+            cleanTitle = postTitle;
+        }
+    } else {
+        // Keep everything up to and including the year (with optional parentheses)
+        const yearMatch = postTitle.match(/^(.*?\(?\s*\b(19|20)\d{2}\b\s*\)?)/i);
+        if (yearMatch) {
+            cleanTitle = yearMatch[1].trim();
+        } else {
+            // No year found — use full title
+            cleanTitle = postTitle;
+        }
+    }
+
     // Remove invalid filename characters
-    postTitle = postTitle.replace(/[:*?"<>|\\\/]/g, '').trim();
+    cleanTitle = cleanTitle.replace(/[:*?"<>|\\\/]/g, '').trim();
+    cleanTitle = cleanTitle.replace(/\s+/g, ' ').trim();
 
-    // Clean up double spaces
-    postTitle = postTitle.replace(/\s+/g, ' ').trim();
-
-    // Build final name: [Episode] PostTitle Resolution
+    // Build final name: [Episode] Title Resolution
     const parts = [];
     if (episode) {
         parts.push(episode.trim());
     }
-    parts.push(postTitle);
+    parts.push(cleanTitle);
     if (resolution) {
         parts.push(resolution.trim());
     }
