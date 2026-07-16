@@ -19,6 +19,107 @@ function cleanFileName(filename) {
     return filename.replace(/\.(mp4|mkv|avi|webm|mov|3gp|srt)$/i, '').trim();
 }
 
+function cleanJunkWords(text) {
+    const junkRegexes = [
+        /\bdual\s+audio\b/gi,
+        /\bhindi-korean\b/gi,
+        /\bhindi\b/gi,
+        /\benglish\b/gi,
+        /\bkorean\b/gi,
+        /\bmulti\s+audio\b/gi,
+        /\bweb-dl\b/gi,
+        /\bwebrip\b/gi,
+        /\bbluray\b/gi,
+        /\bhdtv\b/gi,
+        /\bhdr\b/gi,
+        /\bx264\b/gi,
+        /\bx265\b/gi,
+        /\bhevc\b/gi,
+        /\b10bit\b/gi,
+        /\besub\b/gi,
+        /\bsub\b/gi,
+        /\bsubtitle[s]?\b/gi,
+        /\bseries\b/gi,
+        /\bmovie[s]?\b/gi,
+        /\bfull\s+movie\b/gi,
+        /\borg\b/gi,
+        /\boriginal\b/gi,
+        /\bdirect\s+link[s]?\b/gi,
+        /\blink[s]?\b/gi,
+        /\b480p\b/gi,
+        /\b720p\b/gi,
+        /\b1080p\b/gi,
+        /\b2160p\b/gi,
+        /\b4k\b/gi
+    ];
+
+    let result = text;
+    for (const regex of junkRegexes) {
+        result = result.replace(regex, '');
+    }
+    result = result.replace(/[\[\]\(\)\{\}\-\:]/g, ' ');
+    return result;
+}
+
+function generateCustomFileName(state, primaryHost) {
+    let postTitle = state.title || '';
+    const resolution = state.selectedResolution || '';
+    const episode = primaryHost ? primaryHost.episode : '';
+
+    // Remove "Download" from start
+    postTitle = postTitle.replace(/^download\s+/i, '').trim();
+
+    // Determine if it is a TV show
+    const hasEpisode = !!episode;
+    const isTvShow = hasEpisode || /season\s*\d+|series/i.test(postTitle);
+
+    let cleanTitle = '';
+
+    if (isTvShow) {
+        // Extract up to the season
+        // E.g. "See You at Work Tomorrow (Season 1) ..." or "See You at Work Tomorrow Season 1 ..."
+        const seasonMatch = postTitle.match(/^(.*?)\s*\(?\s*(season\s*\d+)\b\s*\)?/i);
+        if (seasonMatch) {
+            const cleanPrefix = cleanJunkWords(seasonMatch[1]).trim();
+            cleanTitle = `${cleanPrefix} ${seasonMatch[2].trim()}`;
+        } else {
+            cleanTitle = cleanJunkWords(postTitle);
+        }
+    } else {
+        // For movies: keep up to and including the year
+        const yearMatch = postTitle.match(/^(.*?)\s*\(?\s*\b((19|20)\d{2})\b\s*\)?/i);
+        if (yearMatch) {
+            const cleanPrefix = cleanJunkWords(yearMatch[1]).trim();
+            cleanTitle = `${cleanPrefix} ${yearMatch[2].trim()}`;
+        } else {
+            cleanTitle = cleanJunkWords(postTitle);
+        }
+    }
+
+    // Clean up any remaining double spaces
+    cleanTitle = cleanTitle.replace(/\s+/g, ' ').trim();
+
+    // Format the final name
+    if (isTvShow) {
+        const parts = [];
+        if (episode) {
+            // Place episode code at the very beginning
+            parts.push(episode.trim());
+        }
+        parts.push(cleanTitle);
+        if (resolution) {
+            parts.push(resolution.trim());
+        }
+        return parts.join(' ');
+    } else {
+        const parts = [cleanTitle];
+        if (resolution) {
+            parts.push(resolution.trim());
+        }
+        return parts.join(' ');
+    }
+}
+
 const { execSync } = require('child_process');
 
 function extractArchive(archivePath, targetDir) {
@@ -282,6 +383,24 @@ function initUpsertListener(conn) {
                 }
                 delete pendingConfig[cleanSender];
                 delete pendingSearch[cleanSender];
+
+                // Parse custom command and arguments
+                const cmdPart = trimmedText.slice(PREFIX.length).trim();
+                const spaceIdx = cmdPart.indexOf(' ');
+                const cmdName = spaceIdx !== -1 ? cmdPart.substring(0, spaceIdx).trim().toLowerCase() : cmdPart.toLowerCase();
+                const cmdArgs = spaceIdx !== -1 ? cmdPart.substring(spaceIdx + 1).trim() : '';
+
+                if (DANIE_COMMANDS[cmdName]) {
+                    console.log(`[DanieWatch] Executing custom command from upsert listener: "${cmdName}" with args: "${cmdArgs}"`);
+                    try {
+                        await DANIE_COMMANDS[cmdName](conn, mek, from, senderJid, cmdArgs, reply);
+                    } catch (cmdErr) {
+                        console.error(`[DanieWatch] Error executing custom command "${cmdName}":`, cmdErr);
+                        try {
+                            await reply(`❌ Command execution failed: ${cmdErr.message}`);
+                        } catch (_) {}
+                    }
+                }
                 return;
             }
 
@@ -1365,14 +1484,16 @@ async function executeFallbackDownload(conn, mek, from, senderJid, state, chosen
 
             console.log(`[DanieSearch] Fallback system candidates:`, candidates.map(c => c.name));
 
-            // Prepare base title
-            let sanitizedTitle = (state.resolutionHeading || state.title || 'Movie')
-                .replace(/[:*?"<>|\\/]/g, '') // remove invalid filename chars
-                .trim();
-            
+            // Prepare base title using custom filename generation
             const primaryHost = hostsList[0] || {};
-            if (primaryHost.episode) {
-                sanitizedTitle = `${sanitizedTitle} ${primaryHost.episode}`;
+            let sanitizedTitle = generateCustomFileName(state, primaryHost);
+            if (!sanitizedTitle) {
+                sanitizedTitle = (state.resolutionHeading || state.title || 'Movie')
+                    .replace(/[:*?"<>|\\/]/g, '') // remove invalid filename chars
+                    .trim();
+                if (primaryHost.episode) {
+                    sanitizedTitle = `${sanitizedTitle} ${primaryHost.episode}`;
+                }
             }
 
             let downloadSuccess = false;
@@ -1479,6 +1600,7 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
             pendingSearch[cleanSender] = {
                 step: 'select_resolution',
                 title: selectedMovie.title,
+                permalink: selectedMovie.permalink,
                 thumbnail: selectedMovie.thumbnail,
                 links: validLinks,
                 activeDownload: null,
@@ -1594,6 +1716,7 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
                 // TV Show episode selection!
                 state.step = 'select_episode';
                 state.resolutionHeading = selectedLink.heading || selectedLink.text;
+                state.selectedResolution = selectedLink.resolution;
                 state.episodesList = Array.from(episodesMap.keys()).sort((a, b) => {
                     return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
                 });
@@ -1612,6 +1735,7 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
                 }
             } else {
                 // Movie or single file! Directly execute fallback download on all direct hosts
+                state.selectedResolution = selectedLink.resolution;
                 await executeFallbackDownload(conn, mek, from, senderJid, state, directHosts, reply);
             }
         } catch (err) {
