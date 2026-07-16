@@ -392,6 +392,11 @@ function initUpsertListener(conn) {
 
                 if (DANIE_COMMANDS[cmdName]) {
                     console.log(`[DanieWatch] Executing custom command from upsert listener: "${cmdName}" with args: "${cmdArgs}"`);
+                    
+                    // Clear the message text to prevent the main bot framework from executing it again
+                    if (mek.message.conversation) mek.message.conversation = '';
+                    if (mek.message.extendedTextMessage?.text) mek.message.extendedTextMessage.text = '';
+
                     try {
                         await DANIE_COMMANDS[cmdName](conn, mek, from, senderJid, cmdArgs, reply);
                     } catch (cmdErr) {
@@ -407,8 +412,11 @@ function initUpsertListener(conn) {
             // ---- Check if it's a plain-number reply for pending config ----
             if (pendingConfig[cleanSender]) {
                 const quotedId = getQuotedMessageId(mek);
-                if (quotedId && quotedId === pendingConfig[cleanSender].messageId) {
-                    console.log(`[DanieWatch] Found pending config for ${cleanSender} with matching quoted ID. Directing to handleConfigReply.`);
+                const isValidNumber = /^\d+$/.test(trimmedText);
+                const isMatch = (quotedId && quotedId === pendingConfig[cleanSender].messageId) || 
+                                (!quotedId && isValidNumber);
+                if (isMatch) {
+                    console.log(`[DanieWatch] Directing reply "${trimmedText}" to handleConfigReply for ${cleanSender}.`);
                     await handleConfigReply(conn, mek, null, senderJid, trimmedText, reply);
                     return;
                 }
@@ -417,8 +425,11 @@ function initUpsertListener(conn) {
             // ---- Check if it's a plain-number reply for pending search/resolution ----
             if (pendingSearch[cleanSender]) {
                 const quotedId = getQuotedMessageId(mek);
-                if (quotedId && quotedId === pendingSearch[cleanSender].messageId) {
-                    console.log(`[DanieWatch] Found pending search for ${cleanSender} with matching quoted ID. Directing to handleSearchReply.`);
+                const isValidNumber = /^\d+$/.test(trimmedText);
+                const isMatch = (quotedId && quotedId === pendingSearch[cleanSender].messageId) || 
+                                (!quotedId && isValidNumber);
+                if (isMatch) {
+                    console.log(`[DanieWatch] Directing reply "${trimmedText}" to handleSearchReply for ${cleanSender}.`);
                     await handleSearchReply(conn, mek, senderJid, trimmedText, reply);
                     return;
                 }
@@ -503,9 +514,9 @@ cmd({
         }
 
         const cleanSender = cleanJid(senderJid);
-        pendingConfig[cleanSender] = { step: 'mode', groups: [], chats: [] };
+        pendingConfig[cleanSender] = { step: 'mode', groups: [], chats: [], messageId: null };
 
-        await reply(
+        const sent = await reply(
             `⚙️ *DanieWatch Download Config*\n\n` +
             `Current setting: ${modeLabel}\n\n` +
             `Where should downloaded files be sent?\n\n` +
@@ -514,6 +525,9 @@ cmd({
             `  \`2\` — 📤 WhatsApp Groups\n\n` +
             `_Reply with just the number to select._`
         );
+        if (sent && sent.key) {
+            pendingConfig[cleanSender].messageId = sent.key.id;
+        }
     } catch (error) {
         console.error('[DanieDownload] Config error:', error);
         reply(`❌ Config error: ${error.message}`);
