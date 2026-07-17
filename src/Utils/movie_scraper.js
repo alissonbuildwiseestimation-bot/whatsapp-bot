@@ -538,6 +538,8 @@ async function scrapeAllPostLinks(url) {
     try {
         const response = await axios.get(url, { headers: HEADERS, timeout: 15000 });
         const $ = cheerio.load(response.data);
+        const pageTitle = $('title').text() || $('h1').text() || '';
+        const isSeries = /season|episode|series|vol/i.test(pageTitle);
 
         const links = [];
         const contentSelector = 'main.page-body, .page-body, .entry-content, #main-content, div.content-kuss, div.content-area';
@@ -546,7 +548,7 @@ async function scrapeAllPostLinks(url) {
             const href = $(el).attr('href');
             const linkText = $(el).text().trim();
 
-            if (!href || href.trim() === '/' || href.startsWith('#') || href.includes('imdb.com') || href.includes('youtube.com') || href.includes('telegram') || href.includes('facebook') || href.includes('twitter')) {
+            if (!href || href.trim() === '/' || href.startsWith('#') || href.includes('imdb.com') || href.includes('youtube.com') || href.includes('telegram') || href.includes('facebook') || href.includes('twitter') || href.includes('/how-to-download/')) {
                 return;
             }
 
@@ -563,42 +565,58 @@ async function scrapeAllPostLinks(url) {
                 }
             } catch (e) {}
 
+            const isHostLink = lowerHref.includes('hubdrive') || lowerHref.includes('hubcdn') || lowerHref.includes('hubcloud') || lowerHref.includes('vcloud') || lowerHref.includes('gadgetsweb') || lowerHref.includes('fastdl') || lowerHref.includes('filebee') || lowerHref.includes('nexdrive') || lowerHref.includes('vgmlink') || lowerHref.includes('gdflix') || lowerHref.includes('katdrive') || lowerHref.includes('kmhd');
             const hasButton = $(el).find('button, .dwd-button, .btn').length > 0 || $(el).hasClass('btn') || $(el).hasClass('dwd-button');
-            const hasDwdKeyword = linkText.toLowerCase().includes('download') || 
+            const hasDwdKeyword = isHostLink ||
+                                 linkText.toLowerCase().includes('download') || 
                                  linkText.toLowerCase().includes('click here') || 
                                  linkText.toLowerCase().includes('v-cloud') || 
                                  linkText.toLowerCase().includes('g-direct') ||
-                                 lowerHref.includes('nexdrive') || 
-                                 lowerHref.includes('vgmlink') || 
-                                 lowerHref.includes('gdflix') || 
-                                 lowerHref.includes('fastdl') || 
-                                 lowerHref.includes('filebee');
+                                 linkText.toLowerCase().includes('drive') ||
+                                 linkText.toLowerCase().includes('instant');
 
             if (!hasButton && !hasDwdKeyword) {
                 return;
             }
 
+            const parentText = $(el).parent().text().trim();
+
             let precedingHeading = '';
-            let prevParent = $(el).parent();
-            while (prevParent.length && prevParent[0].name !== 'p' && prevParent[0].name !== 'div' && prevParent[0].name !== 'body') {
-                prevParent = prevParent.parent();
-            }
-            if (prevParent.length && prevParent[0].name !== 'body') {
-                let sib = prevParent.prev();
+            let curr = $(el).closest('p, div, h4, h3, h2');
+            let count = 0;
+            while (curr.length && count < 5) {
+                let sib = curr.prev();
                 while (sib.length) {
-                    const tagName = sib[0].name.toLowerCase();
                     const text = sib.text().trim();
-                    if (/^h[1-6]$/.test(tagName) || (tagName === 'p' && text && text !== 'Download Now' && !text.toLowerCase().includes('click here') && !text.toLowerCase().includes('download'))) {
-                        if (text && !text.includes('Quality') && !text.includes('Audio')) {
-                            precedingHeading = text;
-                            break;
+                    if (text && (text.includes('720p') || text.includes('1080p') || text.includes('480p') || text.includes('2160p') || text.includes('4K') || /^h[1-6]$/i.test(sib[0].name))) {
+                        if (!text.toLowerCase().includes('how to download')) {
+                            precedingHeading += ' ' + text;
+                            if (text.includes('720p') || text.includes('1080p') || text.includes('480p') || text.includes('2160p')) break;
                         }
                     }
                     sib = sib.prev();
                 }
+                if (precedingHeading.includes('720p') || precedingHeading.includes('1080p') || precedingHeading.includes('480p') || precedingHeading.includes('2160p')) break;
+                curr = curr.parent();
+                count++;
             }
 
-            const combinedText = `${linkText} ${precedingHeading}`.toLowerCase();
+            const combinedText = `${linkText} ${parentText} ${precedingHeading}`.toLowerCase();
+
+            // Filter out Pack/Zip links for TV Series per user requirement
+            const isPack = /\bpack\b|\bzip\b|\ball\s+episodes\b/i.test(combinedText) || /\bpack\b|\bzip\b/i.test(lowerHref);
+            if (isSeries && isPack) {
+                return;
+            }
+
+            // Determine episode number from parent or link text
+            let episode = null;
+            const epMatch = parentText.match(/\b(?:E|EP|Episode)\s*[:\-–—]?\s*(\d+)\b/i) || linkText.match(/\b(?:E|EP|Episode)\s*[:\-–—]?\s*(\d+)\b/i);
+            if (epMatch) {
+                const epNum = parseInt(epMatch[1], 10);
+                episode = `E${String(epNum).padStart(2, '0')}`;
+            }
+
             let resolution = 'Unknown';
             if (combinedText.includes('2160p') || combinedText.includes('4k')) {
                 resolution = '2160p';
@@ -610,7 +628,9 @@ async function scrapeAllPostLinks(url) {
                 resolution = '480p';
             }
 
-            links.push({ text: linkText, href, resolution, heading: precedingHeading });
+            if (resolution === 'Unknown' && !episode && !isHostLink) return;
+
+            links.push({ text: linkText, href, resolution, episode, heading: precedingHeading.trim(), parentText });
         });
 
         return links;
@@ -643,11 +663,23 @@ function findEpisodeText($, el, pageTitle) {
     // --- Helper: try to parse an episode range or single number from text ---
     // Matches patterns like: "Episodes: 12 + 15", "Episode: 1 + 07", "Episodes 8 - 11"
     const rangeRegex = /episode[s]?\s*[:\s]\s*(\d+)\s*[\+\-–—]\s*(\d+)/i;
-    // Matches single: "Episode: 12", "Episode 5"
+    // Matches single: "Episode: 12", "Episode 5", "E01", "EP01", "S01E01"
     const singleRegex = /episode[s]?\s*[:\s]\s*(\d+)/i;
 
     function parseEpisodeFromText(text) {
         if (!text) return null;
+        const sMatch = text.match(/\bS(\d+)\s*E(\d+)\b/i);
+        if (sMatch) {
+            const sNum = parseInt(sMatch[1], 10);
+            const eNum = parseInt(sMatch[2], 10);
+            return { type: 'single', label: `S${String(sNum).padStart(2, '0')}E${String(eNum).padStart(2, '0')}` };
+        }
+        const epMatch = text.match(/\b(?:E|EP|Episode)\s*[:\-–—]?\s*(\d+)\b/i);
+        if (epMatch) {
+            const epNum = parseInt(epMatch[1], 10);
+            const epStr = `E${String(epNum).padStart(2, '0')}`;
+            return { type: 'single', label: seasonPrefix ? `${seasonPrefix}${epStr}` : `Episode ${epNum}` };
+        }
         const rangeMatch = text.match(rangeRegex);
         if (rangeMatch) {
             const startEp = parseInt(rangeMatch[1], 10);
@@ -922,6 +954,46 @@ async function extractSubOptions(url) {
     }
 }
 
+/**
+ * Search HDHub4u via Typesense API
+ */
+async function searchHdhub4u(query) {
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        const apiUrl = new URL('https://search.pingora.fyi/collections/post/documents/search');
+        apiUrl.searchParams.append('q', query);
+        apiUrl.searchParams.append('query_by', 'post_title,category,stars,director,imdb_id');
+        apiUrl.searchParams.append('query_by_weights', '4,2,2,2,4');
+        apiUrl.searchParams.append('sort_by', 'sort_by_date:desc');
+        apiUrl.searchParams.append('limit', 15);
+        apiUrl.searchParams.append('highlight_fields', 'none');
+        apiUrl.searchParams.append('use_cache', 'true');
+        apiUrl.searchParams.append('page', 1);
+        apiUrl.searchParams.append('analytics_tag', today);
+
+        const res = await axios.get(apiUrl.toString(), {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Referer': 'https://new3.hdhub4u.cl/'
+            },
+            timeout: 10000
+        });
+
+        if (res.data && res.data.hits && res.data.hits.length > 0) {
+            return res.data.hits.map(h => ({
+                title: h.document.post_title.replace(/&amp;/g, '&'),
+                permalink: h.document.permalink.startsWith('http') ? h.document.permalink : `https://new3.hdhub4u.cl${h.document.permalink.startsWith('/') ? '' : '/'}${h.document.permalink}`,
+                thumbnail: h.document.post_thumbnail
+            }));
+        }
+        return [];
+    } catch (err) {
+        console.error('[MovieScraper] Typesense searchHdhub4u failed:', err.message);
+        return [];
+    }
+}
+
 module.exports = {
     fetchTmdbMetadata,
     fetchTmdbById,
@@ -932,6 +1004,8 @@ module.exports = {
     cleanTitle,
     scrapeAllPostLinks,
     extractDirectDownloadLinks,
-    extractSubOptions
+    extractSubOptions,
+    searchHdhub4u
 };
+
 

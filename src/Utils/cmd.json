@@ -9,7 +9,7 @@
     "alive,system,runtime,ping,owner":"main.js",
     "menu,menu2,list,menu3":"menu.js",
     "slsubepisode,slsubseason,mvinfo,imdbinfo,filmp,filpinfo,filmpdl,downloadallshowquality,downloadshowquality,sinhalasub,slsubinfo,slsubdl,cine,moviec,cineshow,downloadshow,cineshowalldl,sinhalamovie,moviesinhala,downloadsinhala,awamovie,movieaw,downloadaw,anime,animemovie,animeshow,downloadanimeshow,baisco,baiscomovie,18movie,18movieinfo,18dl,getxximgs,animo,animoinfo,animodl":"movie.js",
-    "download":"danie_download.js",
+    "download,sh,sv,sr":"danie_download.js",
     "mvdl,mvdlinfo,mvdldownload,mvdlsub,mvdlget,mvdlshowep,mvdlseason,mv,movie":"mvdl.js",
     "anime,animeinfo,animesearch,animedetails,animeep,animedl,animedownload":"anime.js",
     "baiscope,bsinfo,bsget":"baisco.js",

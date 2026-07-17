@@ -3,7 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const fileType = require('file-type');
-const { fetchTmdbMetadata, fetchTmdbById, scrapePostPage, resolveLandingLink, resolveVcloudLink, resolveFinalUrl, scrapeAllPostLinks, extractDirectDownloadLinks, extractSubOptions } = require('../Utils/movie_scraper');
+const { fetchTmdbMetadata, fetchTmdbById, scrapePostPage, resolveLandingLink, resolveVcloudLink, resolveFinalUrl, scrapeAllPostLinks, extractDirectDownloadLinks, extractSubOptions, searchHdhub4u } = require('../Utils/movie_scraper');
 
 // Global handlers to prevent background network disconnect errors from crashing the Node process
 process.on('unhandledRejection', (reason, promise) => {
@@ -340,6 +340,7 @@ const pendingConfig = {};
 const pendingSearch = {};
 const VEGAMOVIES_DOMAIN = 'https://vegamovies.navy';
 const ROGMOVIES_DOMAIN = 'https://rogmovies.rest';
+const HDHUB4U_DOMAIN = process.env.HDHUB4U_DOMAIN || 'https://new3.hdhub4u.cl';
 
 // Our command prefix
 const PREFIX = '.';
@@ -1557,15 +1558,30 @@ DANIE_COMMANDS['sr'] = async (conn, mek, from, senderJid, args, reply) => {
     await searchCommandHandler(conn, mek, from, senderJid, args, reply, 'rogmovies');
 };
 
+DANIE_COMMANDS['sh'] = async (conn, mek, from, senderJid, args, reply) => {
+    await searchCommandHandler(conn, mek, from, senderJid, args, reply, 'hdhub4u');
+};
+
 async function searchCommandHandler(conn, mek, from, senderJid, q, reply, source = 'vegamovies') {
     try {
         const isRog = source === 'rogmovies';
-        const siteName = isRog ? 'Rogmovies' : 'Vegamovies';
-        const siteDomain = isRog ? ROGMOVIES_DOMAIN : VEGAMOVIES_DOMAIN;
-        const cmdHint = isRog ? '.sr' : '.sv';
+        const isHdhub = source === 'hdhub4u' || source === 'hdhub';
+        let siteName = 'Vegamovies';
+        let siteDomain = VEGAMOVIES_DOMAIN;
+        let cmdHint = '.sv';
+
+        if (isRog) {
+            siteName = 'Rogmovies';
+            siteDomain = ROGMOVIES_DOMAIN;
+            cmdHint = '.sr';
+        } else if (isHdhub) {
+            siteName = 'HDHub4u';
+            siteDomain = HDHUB4U_DOMAIN;
+            cmdHint = '.sh';
+        }
 
         if (!q || !q.trim()) {
-            return reply(`❌ Please provide a search keyword!\n\n*Usage:*\n\`${cmdHint} Deadpool\``);
+            return reply(`❌ Please provide a search keyword!\n\n*Usage:*\n\`${cmdHint} Money Heist\``);
         }
 
         const query = q.trim();
@@ -1573,28 +1589,34 @@ async function searchCommandHandler(conn, mek, from, senderJid, q, reply, source
 
         initUpsertListener(conn);
 
-        const url = `${siteDomain}/search.php?q=${encodeURIComponent(query)}&page=1`;
-        console.log(`[DanieSearch] Fetching ${siteName} search API: ${url}`);
-        
-        const res = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/json, text/plain, */*',
-                'Referer': siteDomain + '/'
-            },
-            timeout: 15000
-        });
+        let results = [];
+        if (isHdhub) {
+            results = await searchHdhub4u(query);
+        } else {
+            const url = `${siteDomain}/search.php?q=${encodeURIComponent(query)}&page=1`;
+            console.log(`[DanieSearch] Fetching ${siteName} search API: ${url}`);
+            
+            const res = await axios.get(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'application/json, text/plain, */*',
+                    'Referer': siteDomain + '/'
+                },
+                timeout: 15000
+            });
 
-        if (!res.data || res.data.found === 0 || !res.data.hits || res.data.hits.length === 0) {
-            return reply(`❌ No search results found for *"${query}"* on ${siteName}.`);
+            if (res.data && res.data.hits) {
+                results = res.data.hits.map(h => ({
+                    title: h.document.post_title.replace(/&amp;/g, '&'),
+                    permalink: h.document.permalink,
+                    thumbnail: h.document.post_thumbnail
+                }));
+            }
         }
 
-        const hits = res.data.hits;
-        const results = hits.map(h => ({
-            title: h.document.post_title.replace(/&amp;/g, '&'),
-            permalink: h.document.permalink,
-            thumbnail: h.document.post_thumbnail
-        }));
+        if (!results || results.length === 0) {
+            return reply(`❌ No search results found for *"${query}"* on ${siteName}.`);
+        }
 
         const cleanSender = cleanJid(senderJid);
         pendingSearch[cleanSender] = {
@@ -1828,7 +1850,7 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
             console.log(`[DanieSearch] Scraping post page: ${postUrl}`);
             const allLinks = await scrapeAllPostLinks(postUrl);
 
-            // Filter out unrelated links (keep only V-Cloud or landing page domains)
+            // Filter out unrelated links (keep only V-Cloud, Hubdrive, or landing page domains)
             const validLinks = allLinks.filter(l => {
                 const lowerHref = l.href.toLowerCase();
                 const lowerText = l.text.toLowerCase();
@@ -1843,11 +1865,18 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
                                         lowerHref.includes('vcloud') || 
                                         lowerHref.includes('katdrive') || 
                                         lowerHref.includes('kmhd') || 
-                                        lowerHref.includes('fastdl.zip');
+                                        lowerHref.includes('fastdl.zip') ||
+                                        lowerHref.includes('hubdrive') ||
+                                        lowerHref.includes('hubcdn') ||
+                                        lowerHref.includes('gadgetsweb');
                                         
                 const isVcloudKeyword = lowerHref.includes('vcloud') || 
+                                         lowerHref.includes('hubcloud') || 
+                                         lowerHref.includes('hubdrive') || 
                                          lowerText.includes('v-cloud') || 
                                          lowerText.includes('vcloud') || 
+                                         lowerText.includes('drive') || 
+                                         lowerText.includes('instant') || 
                                          lowerHeading.includes('v-cloud') || 
                                          lowerHeading.includes('vcloud');
                                          
@@ -1859,28 +1888,27 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
                 return reply(`❌ No valid download links could be parsed from this post.`);
             }
 
-            // If any link explicitly says "V-Cloud" in its text, keep ONLY V-Cloud links
-            const hasVcloudText = validLinks.some(l => {
+            // Prefer Hubdrive / V-Cloud / Drive links
+            const hasDriveText = validLinks.some(l => {
                 const lt = l.text.toLowerCase();
-                return lt.includes('v-cloud') || lt.includes('vcloud');
+                const lh = l.href.toLowerCase();
+                return lt.includes('v-cloud') || lt.includes('vcloud') || lt.includes('drive') || lh.includes('hubdrive');
             });
 
             let displayLinks;
-            if (hasVcloudText) {
-                // V-Cloud links exist — keep ONLY those, drop G-Direct/TGDrive/etc
+            if (hasDriveText) {
                 displayLinks = validLinks.filter(l => {
                     const lt = l.text.toLowerCase();
-                    return lt.includes('v-cloud') || lt.includes('vcloud');
+                    const lh = l.href.toLowerCase();
+                    return lt.includes('v-cloud') || lt.includes('vcloud') || lt.includes('drive') || lh.includes('hubdrive') || lh.includes('vcloud') || lh.includes('hubcloud');
                 });
             } else {
-                // No V-Cloud text labels — exclude known bad ones but keep the rest
                 displayLinks = validLinks.filter(l => {
                     const lt = l.text.toLowerCase();
                     return !lt.includes('g-direct') && !lt.includes('gdirect') && 
                            !lt.includes('tgdrive') && !lt.includes('telegram');
                 });
             }
-            // Fall back to all valid links if filtering removed everything
             if (displayLinks.length === 0) displayLinks = validLinks;
 
             // Update state
@@ -1981,24 +2009,45 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
         const selectedLink = links[num - 1];
 
         try {
-            console.log(`[DanieSearch] Resolving direct host links for redirect url: ${selectedLink.href}`);
-            const directHosts = await extractDirectDownloadLinks(selectedLink.href);
-
-            if (!directHosts || directHosts.length === 0) {
-                return reply(`❌ No direct download links could be resolved for this resolution.`);
-            }
-
             // Group hosts by episode to check if this is a series
             const episodesMap = new Map();
-            directHosts.forEach(h => {
-                const epLabel = h.episode;
-                if (epLabel) {
-                    if (!episodesMap.has(epLabel)) {
-                        episodesMap.set(epLabel, []);
+
+            // First check if state.links contains episode labels directly
+            const resMatchingLinks = (state.links || []).filter(l => l.resolution === selectedLink.resolution || selectedLink.resolution === 'Unknown');
+            resMatchingLinks.forEach(l => {
+                if (l.episode) {
+                    if (!episodesMap.has(l.episode)) {
+                        episodesMap.set(l.episode, []);
                     }
-                    episodesMap.get(epLabel).push(h);
+                    const lowerText = l.text.toLowerCase();
+                    const lowerHref = l.href.toLowerCase();
+                    if (lowerText.includes('drive') || lowerHref.includes('hubdrive')) {
+                        episodesMap.get(l.episode).unshift({ text: l.text, href: l.href, episode: l.episode });
+                    } else {
+                        episodesMap.get(l.episode).push({ text: l.text, href: l.href, episode: l.episode });
+                    }
                 }
             });
+
+            let directHosts = [];
+            if (episodesMap.size === 0) {
+                console.log(`[DanieSearch] Resolving direct host links for redirect url: ${selectedLink.href}`);
+                directHosts = await extractDirectDownloadLinks(selectedLink.href);
+
+                if (!directHosts || directHosts.length === 0) {
+                    return reply(`❌ No direct download links could be resolved for this resolution.`);
+                }
+
+                directHosts.forEach(h => {
+                    const epLabel = h.episode;
+                    if (epLabel) {
+                        if (!episodesMap.has(epLabel)) {
+                            episodesMap.set(epLabel, []);
+                        }
+                        episodesMap.get(epLabel).push(h);
+                    }
+                });
+            }
 
             // Check if this post or resolution link represents a TV series/show
             const isTvShow = /season\s*\d+|series|episode/i.test(state.title || '') || 
