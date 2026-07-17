@@ -864,30 +864,61 @@ async function extractSubOptions(url) {
             if (finalLinks.length > 0) return finalLinks;
         }
 
-        // 2. Handle Fastdl direct link redirection
-        if (url.includes('fastdl.zip')) {
-            const res = await axios.get(url, { headers: HEADERS, timeout: 30000 });
-            const scriptContent = res.data;
-            const reurlRegex = /reurl\s*=\s*['"]([^'"]+)['"]/i;
-            const match = reurlRegex.exec(scriptContent);
-            if (match && match[1]) {
-                const reurl = match[1];
-                let target = reurl;
-                try {
-                    const parsedUrl = new URL(reurl);
-                    const linkParam = parsedUrl.searchParams.get('link');
-                    if (linkParam) {
-                        target = linkParam;
+        const res = await axios.get(url, { headers: HEADERS, timeout: 30000 });
+        const html = res.data || '';
+        const $ = cheerio.load(html);
+
+        // 2. Check for `var reurl = "..."` (used by hubcdn.sbs, fastdl, gadgetsweb)
+        const reurlMatch = html.match(/reurl\s*=\s*['"]([^'"]+)['"]/i);
+        if (reurlMatch && reurlMatch[1]) {
+            const reurl = reurlMatch[1];
+            let target = reurl;
+            try {
+                const parsedUrl = new URL(reurl);
+                const rParam = parsedUrl.searchParams.get('r');
+                const linkParam = parsedUrl.searchParams.get('link');
+                if (rParam) {
+                    const decodedR = Buffer.from(rParam, 'base64').toString('utf8');
+                    try {
+                        const parsedDec = new URL(decodedR);
+                        const subLink = parsedDec.searchParams.get('link');
+                        if (subLink) target = subLink;
+                        else target = decodedR;
+                    } catch (e) {
+                        target = decodedR;
                     }
-                } catch (e) {}
-                return [{ text: 'Fastdl Direct Link', href: target }];
-            }
+                } else if (linkParam) {
+                    target = linkParam;
+                }
+            } catch (e) {}
+
+            console.log('[MovieScraper] Resolved var reurl target:', target);
+            return [{ text: 'Direct CDN Link', href: target }];
         }
 
-        // 3. Default: HubCloud / VCloud / GDflix
-        const res = await axios.get(url, { headers: HEADERS, timeout: 30000 });
-        const $ = cheerio.load(res.data);
+        // 3. Check if page contains intermediate links to HubCloud / VCloud (e.g. HubDrive pages)
+        const hubcloudLinks = [];
+        $('a[href]').each((_, el) => {
+            const href = $(el).attr('href');
+            const text = $(el).text().trim();
+            if (!href) return;
+            const lowerHref = href.toLowerCase();
+            if ((lowerHref.includes('hubcloud') || lowerHref.includes('vcloud') || lowerHref.includes('katdrive') || lowerHref.includes('kmhd')) && !lowerHref.includes('telegram') && !lowerHref.includes('/tg/')) {
+                hubcloudLinks.push({ text: text || 'HubCloud Server', href });
+            }
+        });
 
+        if (hubcloudLinks.length > 0) {
+            console.log(`[MovieScraper] Found ${hubcloudLinks.length} HubCloud link(s) on intermediate page.`);
+            const allSubServers = [];
+            for (const hcLink of hubcloudLinks) {
+                const subOpts = await extractSubOptions(hcLink.href);
+                allSubServers.push(...subOpts);
+            }
+            if (allSubServers.length > 0) return allSubServers;
+        }
+
+        // 4. Default: HubCloud / VCloud / GDflix double atob script or var url
         const scriptContent = $('script').text() || '';
         let decodedLink = null;
 
@@ -971,6 +1002,7 @@ async function extractSubOptions(url) {
         return [{ text: 'Original Link', href: url }];
     }
 }
+
 
 /**
  * ============================================================

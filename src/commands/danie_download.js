@@ -320,6 +320,11 @@ function isLandingUrl(url) {
     const lower = url.toLowerCase();
     return lower.includes('vcloud') || 
            lower.includes('hubcloud') || 
+           lower.includes('hubdrive') ||
+           lower.includes('hubcdn') ||
+           lower.includes('gadgetsweb') ||
+           lower.includes('katdrive') ||
+           lower.includes('kmhd') ||
            lower.includes('gdflix') || 
            lower.includes('fastdl') || 
            lower.includes('filebee') || 
