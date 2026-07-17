@@ -346,10 +346,177 @@ const PREFIX = '.';
 
 // Map of our command names to handler functions (populated after they're defined)
 const DANIE_COMMANDS = {};
+const KNOWN_CHATS_PATH = path.join(__dirname, '..', '..', 'session', 'known_chats.json');
+
+function loadKnownChats() {
+    try {
+        if (fs.existsSync(KNOWN_CHATS_PATH)) {
+            return JSON.parse(fs.readFileSync(KNOWN_CHATS_PATH, 'utf-8'));
+        }
+    } catch (e) {
+        console.error('[DanieWatch] Failed to load known_chats.json:', e.message);
+    }
+    return {};
+}
+
+function saveKnownChat(jid, name) {
+    if (!jid || jid.endsWith('@g.us') || jid.includes('broadcast')) return;
+    const clean = cleanJid(jid);
+    if (!clean || clean.endsWith('@g.us')) return;
+
+    const chatsMap = loadKnownChats();
+    const existing = chatsMap[clean] || {};
+    
+    let updatedName = existing.name;
+    if (name && typeof name === 'string' && name.trim() && name.trim() !== clean.split('@')[0]) {
+        updatedName = name.trim();
+    }
+    if (!updatedName) {
+        updatedName = clean.split('@')[0];
+    }
+
+    chatsMap[clean] = {
+        id: clean,
+        name: updatedName,
+        lastSeen: Date.now()
+    };
+
+    try {
+        const dir = path.dirname(KNOWN_CHATS_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(KNOWN_CHATS_PATH, JSON.stringify(chatsMap, null, 2), 'utf-8');
+    } catch (e) {
+        console.error('[DanieWatch] Failed to save known_chats.json:', e.message);
+    }
+}
+
+function getChatsFromSessionDir() {
+    const chats = [];
+    try {
+        const sessionDir = path.join(__dirname, '..', '..', 'session');
+        if (fs.existsSync(sessionDir)) {
+            const files = fs.readdirSync(sessionDir);
+            for (const file of files) {
+                const match = file.match(/^device-list-(\d{7,15})\.json$/i);
+                if (match && match[1]) {
+                    chats.push({ id: `${match[1]}@s.whatsapp.net` });
+                }
+            }
+        }
+    } catch (e) {
+        console.error('[DanieWatch] Failed to scan session dir for chats:', e.message);
+    }
+    return chats;
+}
+
+function getAllPrivateChats(conn, cleanSender) {
+    const rawChats = [];
+
+    // 1. From session directory (device-list-*.json)
+    getChatsFromSessionDir().forEach(c => rawChats.push(c));
+
+    // 2. From known_chats.json
+    const known = loadKnownChats();
+    Object.values(known).forEach(c => rawChats.push(c));
+
+    // 3. From conn.store
+    if (conn && conn.store) {
+        if (conn.store.chats) {
+            const storeChats = typeof conn.store.chats.all === 'function' 
+                ? conn.store.chats.all() 
+                : (conn.store.chats instanceof Map ? Array.from(conn.store.chats.values()) : Object.values(conn.store.chats));
+            storeChats.forEach(c => rawChats.push(c));
+        }
+        if (conn.store.contacts) {
+            const storeContacts = typeof conn.store.contacts.all === 'function' 
+                ? conn.store.contacts.all() 
+                : (conn.store.contacts instanceof Map ? Array.from(conn.store.contacts.values()) : Object.values(conn.store.contacts));
+            storeContacts.forEach(c => rawChats.push(c));
+        }
+        if (conn.store.messages) {
+            try {
+                const msgMap = conn.store.messages;
+                const jids = msgMap instanceof Map ? Array.from(msgMap.keys()) : Object.keys(msgMap);
+                jids.forEach(j => rawChats.push({ id: j }));
+            } catch (e) {}
+        }
+    }
+
+    // 4. From conn.chats & conn.contacts
+    if (conn) {
+        if (conn.chats) {
+            const connChats = conn.chats instanceof Map ? Array.from(conn.chats.values()) : Object.values(conn.chats);
+            connChats.forEach(c => rawChats.push(c));
+        }
+        if (conn.contacts) {
+            const connContacts = conn.contacts instanceof Map ? Array.from(conn.contacts.values()) : Object.values(conn.contacts);
+            connContacts.forEach(c => rawChats.push(c));
+        }
+    }
+
+    // Deduplicate and filter out groups / broadcasts
+    const seen = new Set();
+    let result = [];
+
+    for (const c of rawChats) {
+        if (!c || !c.id) continue;
+        const clean = cleanJid(c.id);
+        if (!clean || clean.endsWith('@g.us') || clean.includes('broadcast')) continue;
+
+        const phone = clean.split('@')[0];
+        const newName = c.name || c.notify || c.verifiedName || c.subject;
+
+        if (seen.has(clean)) {
+            const existingObj = result.find(r => r.id === clean);
+            if (existingObj && newName && newName !== phone && existingObj.name === phone) {
+                existingObj.name = newName;
+            }
+            continue;
+        }
+        seen.add(clean);
+
+        const displayName = newName || phone;
+        result.push({
+            id: clean,
+            name: displayName
+        });
+    }
+
+    // Sort: self first, then by name/id
+    const selfChat = { id: cleanSender, name: 'You (Private Chat)' };
+    const otherChats = result.filter(c => c.id !== cleanSender);
+
+    return [selfChat, ...otherChats];
+}
 
 function initUpsertListener(conn) {
     if (conn.danieDownloadUpsertRegistered) return;
     conn.danieDownloadUpsertRegistered = true;
+
+    // Track contacts & chats events to persist known private chats
+    try {
+        if (conn.ev) {
+            conn.ev.on('contacts.upsert', (contacts) => {
+                const arr = Array.isArray(contacts) ? contacts : [contacts];
+                for (const c of arr) if (c && c.id) saveKnownChat(c.id, c.name || c.notify || c.verifiedName);
+            });
+            conn.ev.on('chats.upsert', (chats) => {
+                const arr = Array.isArray(chats) ? chats : [chats];
+                for (const c of arr) if (c && c.id) saveKnownChat(c.id, c.name || c.subject);
+            });
+            conn.ev.on('messaging-history.set', (history) => {
+                if (history && history.contacts && Array.isArray(history.contacts)) {
+                    for (const c of history.contacts) if (c && c.id) saveKnownChat(c.id, c.name || c.notify || c.verifiedName);
+                }
+                if (history && history.chats && Array.isArray(history.chats)) {
+                    for (const c of history.chats) if (c && c.id) saveKnownChat(c.id, c.name || c.subject);
+                }
+                if (history && history.messages && Array.isArray(history.messages)) {
+                    for (const m of history.messages) if (m && m.key && m.key.remoteJid) saveKnownChat(m.key.remoteJid, m.pushName);
+                }
+            });
+        }
+    } catch (e) {}
 
     conn.ev.on('messages.upsert', async (chatUpdate) => {
         try {
@@ -363,6 +530,10 @@ function initUpsertListener(conn) {
                 senderJid = conn.user.id;
             }
             const cleanSender = cleanJid(senderJid);
+
+            // Save chat JIDs to known chats store
+            if (from) saveKnownChat(from, mek.pushName);
+            if (senderJid) saveKnownChat(senderJid, mek.pushName);
 
             const body = mek.message.conversation ||
                          mek.message.extendedTextMessage?.text ||
@@ -490,9 +661,6 @@ function parseDownloadItem(item) {
 // =========================================================================
 //  .config — Interactive owner-only configuration wizard
 // =========================================================================
-// =========================================================================
-//  .config — Interactive owner-only configuration wizard
-// =========================================================================
 cmd({
     pattern: 'config',
     react: '⚙️',
@@ -554,36 +722,20 @@ async function handleConfigReply(conn, mek, m, senderJid, text, reply) {
         if (text === '1') {
             await reply('🔍 Fetching private chats...');
             try {
-                let chats = [];
-                if (conn.store && conn.store.chats) {
-                    chats = conn.store.chats.all();
-                } else if (conn.chats) {
-                    chats = Object.values(conn.chats);
-                }
-
-                // Filter private chats (s.whatsapp.net, c.us, lid)
-                let privateChats = chats.filter(c => c.id && (c.id.endsWith('@s.whatsapp.net') || c.id.endsWith('@c.us') || c.id.endsWith('@lid')));
-
-                const seenJids = new Set();
-                privateChats = privateChats.filter(c => {
-                    if (seenJids.has(c.id)) return false;
-                    seenJids.add(c.id);
-                    return true;
-                });
-
-                // Always include oneself first
-                const selfChat = { id: cleanSender, name: 'You (Private Chat)' };
-                privateChats = [selfChat, ...privateChats.filter(c => cleanJid(c.id) !== cleanSender)];
-
-                // Limit top 15
-                privateChats = privateChats.slice(0, 15);
+                const privateChats = getAllPrivateChats(conn, cleanSender);
 
                 pendingConfig[cleanSender] = { step: 'private_chat', chats: privateChats, messageId: null };
 
                 let list = '📋 *Select a Private Chat:*\n\n';
                 privateChats.forEach((c, i) => {
-                    const name = c.name || c.subject || c.verifiedName || c.notify || c.id.split('@')[0];
-                    list += `  \`${i + 1}\` — ${name}\n`;
+                    const phone = c.id.split('@')[0];
+                    if (c.id === cleanSender) {
+                        list += `  \`${i + 1}\` — 👤 You (Private Chat)\n`;
+                    } else if (c.name && c.name !== phone) {
+                        list += `  \`${i + 1}\` — 👤 ${c.name} (+${phone})\n`;
+                    } else {
+                        list += `  \`${i + 1}\` — 👤 +${phone}\n`;
+                    }
                 });
                 list += `\n_Reply with just the number to choose._`;
 
