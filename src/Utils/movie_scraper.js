@@ -903,8 +903,12 @@ async function extractSubOptions(url) {
             const text = $(el).text().trim();
             if (!href) return;
             const lowerHref = href.toLowerCase();
-            if ((lowerHref.includes('hubcloud') || lowerHref.includes('vcloud') || lowerHref.includes('katdrive') || lowerHref.includes('kmhd')) && !lowerHref.includes('telegram') && !lowerHref.includes('/tg/')) {
-                hubcloudLinks.push({ text: text || 'HubCloud Server', href });
+            const isDrivePath = lowerHref.includes('/drive/') || lowerHref.includes('/file/') || lowerHref.includes('?id=');
+            const isJunk = lowerHref.includes('telegram') || lowerHref.includes('/tg/') || lowerHref.includes('/admin') || lowerHref.includes('.fans');
+            if ((lowerHref.includes('hubcloud') || lowerHref.includes('vcloud') || lowerHref.includes('katdrive') || lowerHref.includes('kmhd')) && isDrivePath && !isJunk) {
+                if (!hubcloudLinks.some(hl => hl.href === href)) {
+                    hubcloudLinks.push({ text: text || 'HubCloud Server', href });
+                }
             }
         });
 
