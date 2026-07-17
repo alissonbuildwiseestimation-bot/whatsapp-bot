@@ -346,23 +346,97 @@ const PREFIX = '.';
 
 // Map of our command names to handler functions (populated after they're defined)
 const DANIE_COMMANDS = {};
+const ACTIVE_CHATS_PATH = path.join(__dirname, '..', '..', 'session', 'active_chats.json');
+
+function loadActiveChats() {
+    try {
+        if (fs.existsSync(ACTIVE_CHATS_PATH)) {
+            return JSON.parse(fs.readFileSync(ACTIVE_CHATS_PATH, 'utf-8'));
+        }
+    } catch (e) {
+        console.error('[DanieWatch] Failed to load active_chats.json:', e.message);
+    }
+    return {};
+}
+
+function saveActiveChat(jid, name, notify) {
+    if (!jid || typeof jid !== 'string') return;
+    if (jid.endsWith('@g.us') || jid.includes('broadcast')) return;
+    const clean = cleanJid(jid);
+    if (!clean || clean.endsWith('@g.us') || clean.includes('broadcast')) return;
+
+    const chatsMap = loadActiveChats();
+    const existing = chatsMap[clean] || {};
+
+    const cleanPhone = clean.split('@')[0];
+    let newName = existing.name;
+    let newNotify = existing.notify;
+
+    if (name && typeof name === 'string' && name.trim() && name.trim() !== cleanPhone) {
+        newName = name.trim();
+    }
+    if (notify && typeof notify === 'string' && notify.trim() && notify.trim() !== cleanPhone) {
+        newNotify = notify.trim();
+    }
+
+    chatsMap[clean] = {
+        id: clean,
+        name: newName || undefined,
+        notify: newNotify || undefined,
+        lastUpdated: Date.now()
+    };
+
+    try {
+        const dir = path.dirname(ACTIVE_CHATS_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(ACTIVE_CHATS_PATH, JSON.stringify(chatsMap, null, 2), 'utf-8');
+    } catch (e) {
+        console.error('[DanieWatch] Failed to save active_chats.json:', e.message);
+    }
+}
+
 function getAllPrivateChats(conn, cleanSender) {
     const rawChats = [];
 
+    // 1. From saved active_chats.json (captured from live WhatsApp events)
+    const saved = loadActiveChats();
+    Object.values(saved).forEach(c => rawChats.push(c));
+
     if (conn) {
-        if (conn.store && conn.store.chats) {
+        // 2. From conn.contacts
+        if (conn.contacts) {
             try {
-                const storeChats = typeof conn.store.chats.all === 'function' 
-                    ? conn.store.chats.all() 
-                    : (conn.store.chats instanceof Map ? Array.from(conn.store.chats.values()) : Object.values(conn.store.chats));
-                storeChats.forEach(c => rawChats.push(c));
+                const connContacts = conn.contacts instanceof Map ? Array.from(conn.contacts.values()) : Object.values(conn.contacts);
+                connContacts.forEach(c => rawChats.push(c));
             } catch (e) {}
         }
+
+        // 3. From conn.chats
         if (conn.chats) {
             try {
                 const connChats = conn.chats instanceof Map ? Array.from(conn.chats.values()) : Object.values(conn.chats);
                 connChats.forEach(c => rawChats.push(c));
             } catch (e) {}
+        }
+
+        // 4. From conn.store
+        if (conn.store) {
+            if (conn.store.contacts) {
+                try {
+                    const storeContacts = typeof conn.store.contacts.all === 'function'
+                        ? conn.store.contacts.all()
+                        : (conn.store.contacts instanceof Map ? Array.from(conn.store.contacts.values()) : Object.values(conn.store.contacts));
+                    storeContacts.forEach(c => rawChats.push(c));
+                } catch (e) {}
+            }
+            if (conn.store.chats) {
+                try {
+                    const storeChats = typeof conn.store.chats.all === 'function'
+                        ? conn.store.chats.all()
+                        : (conn.store.chats instanceof Map ? Array.from(conn.store.chats.values()) : Object.values(conn.store.chats));
+                    storeChats.forEach(c => rawChats.push(c));
+                } catch (e) {}
+            }
         }
     }
 
@@ -376,18 +450,20 @@ function getAllPrivateChats(conn, cleanSender) {
         if (!clean || clean.endsWith('@g.us') || clean.includes('broadcast')) continue;
 
         const phone = clean.split('@')[0];
-        const newName = c.name || c.notify || c.verifiedName || c.subject;
+        const contactName = c.name || c.verifiedName;
+        const notifyName = c.notify || c.pushName;
 
         if (seen.has(clean)) {
             const existingObj = result.find(r => r.id === clean);
-            if (existingObj && newName && newName !== phone && existingObj.name === phone) {
-                existingObj.name = newName;
+            if (existingObj) {
+                if (contactName && contactName !== phone) existingObj.name = contactName;
+                if (notifyName && notifyName !== phone && !existingObj.name) existingObj.name = notifyName;
             }
             continue;
         }
         seen.add(clean);
 
-        const displayName = newName || phone;
+        const displayName = (contactName && contactName !== phone) ? contactName : ((notifyName && notifyName !== phone) ? notifyName : phone);
         result.push({
             id: clean,
             name: displayName
@@ -405,6 +481,35 @@ function initUpsertListener(conn) {
     if (conn.danieDownloadUpsertRegistered) return;
     conn.danieDownloadUpsertRegistered = true;
 
+    // Listen to WhatsApp sync events to capture active chats & contacts
+    try {
+        if (conn.ev) {
+            conn.ev.on('contacts.upsert', (contacts) => {
+                const arr = Array.isArray(contacts) ? contacts : [contacts];
+                for (const c of arr) if (c && c.id) saveActiveChat(c.id, c.name || c.verifiedName, c.notify);
+            });
+            conn.ev.on('contacts.update', (updates) => {
+                const arr = Array.isArray(updates) ? updates : [updates];
+                for (const c of arr) if (c && c.id) saveActiveChat(c.id, c.name || c.verifiedName, c.notify);
+            });
+            conn.ev.on('chats.upsert', (chats) => {
+                const arr = Array.isArray(chats) ? chats : [chats];
+                for (const c of arr) if (c && c.id) saveActiveChat(c.id, c.name || c.subject, c.notify);
+            });
+            conn.ev.on('messaging-history.set', (history) => {
+                if (history && history.contacts && Array.isArray(history.contacts)) {
+                    for (const c of history.contacts) if (c && c.id) saveActiveChat(c.id, c.name || c.verifiedName, c.notify);
+                }
+                if (history && history.chats && Array.isArray(history.chats)) {
+                    for (const c of history.chats) if (c && c.id) saveActiveChat(c.id, c.name || c.subject, c.notify);
+                }
+                if (history && history.messages && Array.isArray(history.messages)) {
+                    for (const m of history.messages) if (m && m.key && m.key.remoteJid) saveActiveChat(m.key.remoteJid, null, m.pushName);
+                }
+            });
+        }
+    } catch (e) {}
+
     conn.ev.on('messages.upsert', async (chatUpdate) => {
         try {
             if (chatUpdate.type !== 'notify') return;
@@ -417,6 +522,10 @@ function initUpsertListener(conn) {
                 senderJid = conn.user.id;
             }
             const cleanSender = cleanJid(senderJid);
+
+            // Record incoming/outgoing chat JIDs
+            if (from) saveActiveChat(from, null, mek.pushName);
+            if (senderJid) saveActiveChat(senderJid, null, mek.pushName);
 
             const body = mek.message.conversation ||
                          mek.message.extendedTextMessage?.text ||
