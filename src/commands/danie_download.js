@@ -346,111 +346,23 @@ const PREFIX = '.';
 
 // Map of our command names to handler functions (populated after they're defined)
 const DANIE_COMMANDS = {};
-const KNOWN_CHATS_PATH = path.join(__dirname, '..', '..', 'session', 'known_chats.json');
-
-function loadKnownChats() {
-    try {
-        if (fs.existsSync(KNOWN_CHATS_PATH)) {
-            return JSON.parse(fs.readFileSync(KNOWN_CHATS_PATH, 'utf-8'));
-        }
-    } catch (e) {
-        console.error('[DanieWatch] Failed to load known_chats.json:', e.message);
-    }
-    return {};
-}
-
-function saveKnownChat(jid, name) {
-    if (!jid || jid.endsWith('@g.us') || jid.includes('broadcast')) return;
-    const clean = cleanJid(jid);
-    if (!clean || clean.endsWith('@g.us')) return;
-
-    const chatsMap = loadKnownChats();
-    const existing = chatsMap[clean] || {};
-    
-    let updatedName = existing.name;
-    if (name && typeof name === 'string' && name.trim() && name.trim() !== clean.split('@')[0]) {
-        updatedName = name.trim();
-    }
-    if (!updatedName) {
-        updatedName = clean.split('@')[0];
-    }
-
-    chatsMap[clean] = {
-        id: clean,
-        name: updatedName,
-        lastSeen: Date.now()
-    };
-
-    try {
-        const dir = path.dirname(KNOWN_CHATS_PATH);
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(KNOWN_CHATS_PATH, JSON.stringify(chatsMap, null, 2), 'utf-8');
-    } catch (e) {
-        console.error('[DanieWatch] Failed to save known_chats.json:', e.message);
-    }
-}
-
-function getChatsFromSessionDir() {
-    const chats = [];
-    try {
-        const sessionDir = path.join(__dirname, '..', '..', 'session');
-        if (fs.existsSync(sessionDir)) {
-            const files = fs.readdirSync(sessionDir);
-            for (const file of files) {
-                const match = file.match(/^device-list-(\d{7,15})\.json$/i);
-                if (match && match[1]) {
-                    chats.push({ id: `${match[1]}@s.whatsapp.net` });
-                }
-            }
-        }
-    } catch (e) {
-        console.error('[DanieWatch] Failed to scan session dir for chats:', e.message);
-    }
-    return chats;
-}
-
 function getAllPrivateChats(conn, cleanSender) {
     const rawChats = [];
 
-    // 1. From session directory (device-list-*.json)
-    getChatsFromSessionDir().forEach(c => rawChats.push(c));
-
-    // 2. From known_chats.json
-    const known = loadKnownChats();
-    Object.values(known).forEach(c => rawChats.push(c));
-
-    // 3. From conn.store
-    if (conn && conn.store) {
-        if (conn.store.chats) {
-            const storeChats = typeof conn.store.chats.all === 'function' 
-                ? conn.store.chats.all() 
-                : (conn.store.chats instanceof Map ? Array.from(conn.store.chats.values()) : Object.values(conn.store.chats));
-            storeChats.forEach(c => rawChats.push(c));
-        }
-        if (conn.store.contacts) {
-            const storeContacts = typeof conn.store.contacts.all === 'function' 
-                ? conn.store.contacts.all() 
-                : (conn.store.contacts instanceof Map ? Array.from(conn.store.contacts.values()) : Object.values(conn.store.contacts));
-            storeContacts.forEach(c => rawChats.push(c));
-        }
-        if (conn.store.messages) {
+    if (conn) {
+        if (conn.store && conn.store.chats) {
             try {
-                const msgMap = conn.store.messages;
-                const jids = msgMap instanceof Map ? Array.from(msgMap.keys()) : Object.keys(msgMap);
-                jids.forEach(j => rawChats.push({ id: j }));
+                const storeChats = typeof conn.store.chats.all === 'function' 
+                    ? conn.store.chats.all() 
+                    : (conn.store.chats instanceof Map ? Array.from(conn.store.chats.values()) : Object.values(conn.store.chats));
+                storeChats.forEach(c => rawChats.push(c));
             } catch (e) {}
         }
-    }
-
-    // 4. From conn.chats & conn.contacts
-    if (conn) {
         if (conn.chats) {
-            const connChats = conn.chats instanceof Map ? Array.from(conn.chats.values()) : Object.values(conn.chats);
-            connChats.forEach(c => rawChats.push(c));
-        }
-        if (conn.contacts) {
-            const connContacts = conn.contacts instanceof Map ? Array.from(conn.contacts.values()) : Object.values(conn.contacts);
-            connContacts.forEach(c => rawChats.push(c));
+            try {
+                const connChats = conn.chats instanceof Map ? Array.from(conn.chats.values()) : Object.values(conn.chats);
+                connChats.forEach(c => rawChats.push(c));
+            } catch (e) {}
         }
     }
 
@@ -482,7 +394,7 @@ function getAllPrivateChats(conn, cleanSender) {
         });
     }
 
-    // Sort: self first, then by name/id
+    // Always include oneself first
     const selfChat = { id: cleanSender, name: 'You (Private Chat)' };
     const otherChats = result.filter(c => c.id !== cleanSender);
 
@@ -492,31 +404,6 @@ function getAllPrivateChats(conn, cleanSender) {
 function initUpsertListener(conn) {
     if (conn.danieDownloadUpsertRegistered) return;
     conn.danieDownloadUpsertRegistered = true;
-
-    // Track contacts & chats events to persist known private chats
-    try {
-        if (conn.ev) {
-            conn.ev.on('contacts.upsert', (contacts) => {
-                const arr = Array.isArray(contacts) ? contacts : [contacts];
-                for (const c of arr) if (c && c.id) saveKnownChat(c.id, c.name || c.notify || c.verifiedName);
-            });
-            conn.ev.on('chats.upsert', (chats) => {
-                const arr = Array.isArray(chats) ? chats : [chats];
-                for (const c of arr) if (c && c.id) saveKnownChat(c.id, c.name || c.subject);
-            });
-            conn.ev.on('messaging-history.set', (history) => {
-                if (history && history.contacts && Array.isArray(history.contacts)) {
-                    for (const c of history.contacts) if (c && c.id) saveKnownChat(c.id, c.name || c.notify || c.verifiedName);
-                }
-                if (history && history.chats && Array.isArray(history.chats)) {
-                    for (const c of history.chats) if (c && c.id) saveKnownChat(c.id, c.name || c.subject);
-                }
-                if (history && history.messages && Array.isArray(history.messages)) {
-                    for (const m of history.messages) if (m && m.key && m.key.remoteJid) saveKnownChat(m.key.remoteJid, m.pushName);
-                }
-            });
-        }
-    } catch (e) {}
 
     conn.ev.on('messages.upsert', async (chatUpdate) => {
         try {
@@ -530,10 +417,6 @@ function initUpsertListener(conn) {
                 senderJid = conn.user.id;
             }
             const cleanSender = cleanJid(senderJid);
-
-            // Save chat JIDs to known chats store
-            if (from) saveKnownChat(from, mek.pushName);
-            if (senderJid) saveKnownChat(senderJid, mek.pushName);
 
             const body = mek.message.conversation ||
                          mek.message.extendedTextMessage?.text ||
