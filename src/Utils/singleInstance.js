@@ -73,7 +73,7 @@ function killPreviousInstances() {
             if (portPidStr) {
                 const pids = portPidStr.split(/\s+/).map(p => parseInt(p, 10)).filter(Boolean);
                 for (const p of pids) {
-                    if (p !== myPid && p !== parentPid) {
+                    if (p > 0 && p !== myPid && p !== parentPid && p !== process.ppid) {
                         console.log(`[SingleInstance] Releasing port ${targetPort} held by PID: ${p}`);
                         try { process.kill(p, 'SIGKILL'); } catch (_) {}
                     }
