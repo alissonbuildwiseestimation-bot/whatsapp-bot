@@ -1911,6 +1911,11 @@ DANIE_COMMANDS['owners'] = DANIE_COMMANDS['allowed'];
 DANIE_COMMANDS['sudolist'] = DANIE_COMMANDS['allowed'];
 
 DANIE_COMMANDS['alive'] = async (conn, mek, from, senderJid, args, reply) => {
+    try {
+        if (conn && mek && mek.key) {
+            await conn.sendMessage(from, { react: { text: '⚡', key: mek.key } });
+        }
+    } catch(e) {}
     const settings = loadSettings();
     const modeLabel = settings.mode === 'group' ? 'Group' : 'Private';
     const uptime = formatUptime(process.uptime());
