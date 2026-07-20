@@ -133,6 +133,36 @@ async function fetchTmdbMetadata(query, mediaType = 'movie', imdbId = null) {
 }
 
 /**
+ * Fetch YouTube trailer URL for a TMDB ID
+ */
+async function fetchTmdbTrailerUrl(tmdbId, mediaType = 'movie') {
+    try {
+        const url = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}/videos?api_key=${TMDB_API_KEY}`;
+        const res = await axios.get(url, { headers: HEADERS, timeout: 10000 });
+        if (!res.data || !res.data.results || res.data.results.length === 0) return null;
+
+        const ytVideos = res.data.results.filter(v => v.site === 'YouTube' && v.key);
+        if (ytVideos.length === 0) return null;
+
+        // Priority 1: Official Trailer
+        let chosen = ytVideos.find(v => v.type === 'Trailer' && v.official);
+        // Priority 2: Any Trailer
+        if (!chosen) chosen = ytVideos.find(v => v.type === 'Trailer');
+        // Priority 3: Official Teaser
+        if (!chosen) chosen = ytVideos.find(v => v.type === 'Teaser' && v.official);
+        // Priority 4: Any Teaser
+        if (!chosen) chosen = ytVideos.find(v => v.type === 'Teaser');
+        // Priority 5: First YouTube video
+        if (!chosen) chosen = ytVideos[0];
+
+        return chosen ? `https://www.youtube.com/watch?v=${chosen.key}` : null;
+    } catch (err) {
+        console.error('[MovieScraper] TMDB trailer fetch failed:', err.message);
+        return null;
+    }
+}
+
+/**
  * Fetch movie/series metadata from TMDB using a specific TMDB ID
  */
 async function fetchTmdbById(tmdbId, mediaType = 'movie') {
@@ -148,6 +178,7 @@ async function fetchTmdbById(tmdbId, mediaType = 'movie') {
         const releaseDate = details.release_date || details.first_air_date || '';
         const year = releaseDate ? releaseDate.split('-')[0] : 'N/A';
         const genres = details.genres ? details.genres.map(g => g.name).join(', ') : 'Unknown';
+        const trailerUrl = await fetchTmdbTrailerUrl(tmdbId, mediaType);
 
         return {
             tmdbId,
@@ -156,6 +187,7 @@ async function fetchTmdbById(tmdbId, mediaType = 'movie') {
             overview,
             genres,
             posterUrl,
+            trailerUrl,
             type: mediaType,
             releaseDate,
             seasons: details.seasons || [],
@@ -167,6 +199,54 @@ async function fetchTmdbById(tmdbId, mediaType = 'movie') {
         return null;
     }
 }
+
+/**
+ * Download direct YouTube video URL using cnv.cx engine
+ */
+async function downloadYoutubeVideoUrl(ytUrl, quality = '720', format = 'mp4') {
+    const customHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+        'Referer': 'https://frame.y2meta-uk.com/',
+        'Origin': 'https://frame.y2meta-uk.com',
+        'Accept': '*/*'
+    };
+
+    try {
+        console.log('[MovieScraper] Requesting cnv.cx API key...');
+        const keyRes = await axios.get('https://cnv.cx/v2/sanity/key', { headers: customHeaders, timeout: 10000 });
+        if (!keyRes.data || !keyRes.data.key) throw new Error('Key fetch failed');
+        const apiKey = keyRes.data.key;
+
+        const params = new URLSearchParams({
+            link: ytUrl,
+            format: format,
+            audioBitrate: '128',
+            videoQuality: quality,
+            filenameStyle: 'pretty',
+            vCodec: 'h264'
+        });
+
+        console.log('[MovieScraper] Converting YouTube video URL...');
+        const convRes = await axios.post('https://cnv.cx/v2/converter', params.toString(), {
+            headers: {
+                ...customHeaders,
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'key': apiKey
+            },
+            timeout: 15000
+        });
+
+        if (convRes.data && convRes.data.url) {
+            console.log('[MovieScraper] Direct YouTube video URL resolved:', convRes.data.url);
+            return convRes.data.url;
+        }
+        return null;
+    } catch (err) {
+        console.error('[MovieScraper] cnv.cx YouTube video resolution failed:', err.message);
+        return null;
+    }
+}
+
 
 
 function getGenreName(id) {
@@ -1261,6 +1341,8 @@ async function searchHdhub4u(query) {
 module.exports = {
     fetchTmdbMetadata,
     fetchTmdbById,
+    fetchTmdbTrailerUrl,
+    downloadYoutubeVideoUrl,
     scrapePostPage,
     resolveLandingLink,
     resolveVcloudLink,

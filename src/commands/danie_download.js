@@ -3,7 +3,7 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const fileType = require('file-type');
-const { fetchTmdbMetadata, fetchTmdbById, scrapePostPage, resolveLandingLink, resolveVcloudLink, resolveFinalUrl, scrapeAllPostLinks, extractDirectDownloadLinks, extractSubOptions, searchHdhub4u } = require('../Utils/movie_scraper');
+const { fetchTmdbMetadata, fetchTmdbById, downloadYoutubeVideoUrl, scrapePostPage, resolveLandingLink, resolveVcloudLink, resolveFinalUrl, scrapeAllPostLinks, extractDirectDownloadLinks, extractSubOptions, searchHdhub4u } = require('../Utils/movie_scraper');
 
 // Global handlers to prevent background network disconnect errors from crashing the Node process
 process.on('unhandledRejection', (reason, promise) => {
@@ -1601,13 +1601,53 @@ async function pCommandHandler(conn, mek, from, senderJid, q, reply, abortSignal
             }
         }
         
-        if (!posterSent) {
-            await conn.sendMessage(destJid, {
-                text: detailsMessage
-            }, destJid === from ? { quoted: mek } : {});
-        }
-
         await reply(`✅ TMDB details and poster successfully fetched and sent to: *${destLabel}*`);
+
+        // 3. Fetch and send trailer video from YouTube if available
+        if (tmdb.trailerUrl) {
+            console.log(`[DanieDownload] Fetching trailer video for ${tmdb.title} (${tmdb.trailerUrl})...`);
+            const tempTrailerPath = path.join(__dirname, 'tmp_trailer_' + Date.now() + '.mp4');
+            try {
+                const directVideoUrl = await downloadYoutubeVideoUrl(tmdb.trailerUrl);
+                if (directVideoUrl) {
+                    await reply(`⏳ Downloading trailer video from YouTube...`);
+                    const videoResponse = await axios({
+                        method: 'get',
+                        url: directVideoUrl,
+                        responseType: 'stream',
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                        },
+                        timeout: 60000
+                    });
+
+                    const videoWriter = fs.createWriteStream(tempTrailerPath);
+                    videoResponse.data.pipe(videoWriter);
+
+                    await new Promise((resolve, reject) => {
+                        videoWriter.on('finish', resolve);
+                        videoWriter.on('error', reject);
+                    });
+
+                    if (fs.existsSync(tempTrailerPath)) {
+                        const stats = fs.statSync(tempTrailerPath);
+                        if (stats.size > 0) {
+                            await conn.sendMessage(destJid, {
+                                video: { url: tempTrailerPath },
+                                caption: `🎬 *Trailer:* *${tmdb.title}*`
+                            }, destJid === from ? { quoted: mek } : {});
+                            console.log(`[DanieDownload] Successfully sent trailer video for ${tmdb.title}`);
+                        }
+                    }
+                } else {
+                    console.log(`[DanieDownload] Could not resolve direct YouTube video URL for trailer.`);
+                }
+            } catch (err) {
+                console.error('[DanieDownload] Trailer download/upload failed:', err.message);
+            } finally {
+                try { if (fs.existsSync(tempTrailerPath)) fs.unlinkSync(tempTrailerPath); } catch (_) {}
+            }
+        }
 
         // Check if there are media download links provided in .p command
         const downloadItems = [];
