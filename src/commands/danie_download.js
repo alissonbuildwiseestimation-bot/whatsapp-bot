@@ -2301,12 +2301,12 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
                 state.episodesMap = Object.fromEntries(episodesMap);
                 state.messageId = null;
 
-                let episodeListText = `🌐 *Select an episode to download:* \n_${selectedLink.heading || selectedLink.text}_\n\n`;
+                let episodeListText = `🌐 *Select episode(s) to download:* \n_${selectedLink.heading || selectedLink.text}_\n\n`;
                 state.episodesList.forEach((ep, idx) => {
                     episodeListText += `  \`${idx + 1}\` — *${ep}*\n`;
                 });
                 episodeListText += `  \`${state.episodesList.length + 1}\` — 📥 *Download All Episodes*\n`;
-                episodeListText += `\n_Reply to this message with the episode number._`;
+                episodeListText += `\n_Reply with episode number(s) (e.g. \`1\`, \`1, 3, 5\`, \`1-5\`), or \`${state.episodesList.length + 1}\` for All._`;
 
                 const sent = await reply(episodeListText);
                 if (sent && sent.key) {
@@ -2324,155 +2324,47 @@ async function handleSearchReply(conn, mek, senderJid, text, reply) {
     } else if (state.step === 'select_episode') {
         const epList = state.episodesList || [];
         const downloadAllOption = epList.length + 1;
-        if (isNaN(num) || num < 1 || num > downloadAllOption) {
-            return reply(`❌ Invalid episode number. Reply with a number from 1 to ${downloadAllOption}.`);
+        const rawText = text.trim().toLowerCase();
+
+        let selectedIndices = [];
+
+        if (rawText === 'all' || rawText === String(downloadAllOption)) {
+            selectedIndices = epList.map((_, i) => i);
+        } else {
+            const parts = rawText.split(/[\s,]+/);
+            for (const part of parts) {
+                if (part.includes('-')) {
+                    const rangeParts = part.split('-').map(s => s.trim());
+                    const startNum = parseInt(rangeParts[0], 10);
+                    const endNum = parseInt(rangeParts[1], 10);
+                    if (!isNaN(startNum) && !isNaN(endNum) && startNum >= 1 && endNum <= epList.length && startNum <= endNum) {
+                        for (let i = startNum; i <= endNum; i++) {
+                            if (!selectedIndices.includes(i - 1)) selectedIndices.push(i - 1);
+                        }
+                    }
+                } else {
+                    const num = parseInt(part, 10);
+                    if (!isNaN(num) && num >= 1 && num <= epList.length) {
+                        if (!selectedIndices.includes(num - 1)) selectedIndices.push(num - 1);
+                    }
+                }
+            }
         }
 
-        if (num === downloadAllOption) {
-            // ── Download All Episodes sequentially ──
-            await reply(`📥 *Downloading all ${epList.length} episodes one by one...*\nThis may take a while. Please wait.`);
+        if (selectedIndices.length === 0) {
+            return reply(`❌ Invalid episode selection. Reply with episode number(s) (e.g. \`1\`, \`1, 3, 5\`, \`1-5\`), or \`${downloadAllOption}\` for All Episodes.`);
+        }
 
-            // Prevent the state from being deleted after first successful episode
-            state.bulkDownloadActive = true;
+        await reply(`📥 *Adding ${selectedIndices.length} episode(s) to download queue...*`);
 
-            let successCount = 0;
-            let failCount = 0;
-
-            for (let i = 0; i < epList.length; i++) {
-                const epLabel = epList[i];
-                const episodeHosts = (state.episodesMap || {})[epLabel] || [];
-
-                if (episodeHosts.length === 0) {
-                    await reply(`⚠️ Skipping *${epLabel}* — no download hosts found.`);
-                    failCount++;
-                    continue;
-                }
-
-                await reply(`⏳ *[${i + 1}/${epList.length}]* Downloading *${epLabel}*...`);
-
-                try {
-                    // Create a fresh controller for each episode
-                    const controller = new AbortController();
-                    const activeDownloadRef = { filePath: null };
-                    state.activeDownload = { controller, ref: activeDownloadRef };
-
-                    // Build candidate list using the same logic as executeFallbackDownload
-                    const hostsList = Array.isArray(episodeHosts) ? episodeHosts : [episodeHosts];
-                    let candidates = [];
-
-                    const candidates10g = [];
-                    const candidatesFslv2 = [];
-                    const candidatesFsl = [];
-                    const candidatesOther = [];
-
-                    for (const host of hostsList) {
-                        if (isLandingUrl(host.href)) {
-                            let subOpts = null;
-                            for (let attempt = 1; attempt <= 2; attempt++) {
-                                try {
-                                    subOpts = await extractSubOptions(host.href);
-                                    const hasRealServers = subOpts.some(opt => {
-                                        const t = opt.text.toLowerCase();
-                                        return t.includes('fsl') || t.includes('10gbps') || t.includes('server');
-                                    });
-                                    if (hasRealServers || attempt >= 2) break;
-                                    await new Promise(r => setTimeout(r, 3000));
-                                } catch (subErr) {
-                                    if (attempt < 2) await new Promise(r => setTimeout(r, 3000));
-                                }
-                            }
-                            if (subOpts && subOpts.length > 0) {
-                                const opt10gbps = subOpts.find(opt => opt.text.toLowerCase().includes('10gbps'));
-                                const optFslv2 = subOpts.find(opt => opt.text.toLowerCase().includes('fslv2'));
-                                const optFsl = subOpts.find(opt => opt.text.toLowerCase().includes('fsl') && !opt.text.toLowerCase().includes('fslv2'));
-                                if (opt10gbps) candidates10g.push({ name: '10Gbps Server', href: opt10gbps.href });
-                                if (optFslv2) candidatesFslv2.push({ name: 'FSLv2 Server', href: optFslv2.href });
-                                if (optFsl) candidatesFsl.push({ name: 'FSL Server', href: optFsl.href });
-                                subOpts.forEach(opt => {
-                                    const txt = opt.text.toLowerCase();
-                                    if (!txt.includes('10gbps') && !txt.includes('fsl') && !txt.includes('fslv2') && !txt.includes('login') && !txt.includes('admin')) {
-                                        candidatesOther.push({ name: opt.text, href: opt.href });
-                                    }
-                                });
-                            }
-                        } else {
-                            candidatesOther.push({ name: host.text || 'Direct Link', href: host.href });
-                        }
-                    }
-
-                    const hasVcloudServers = candidatesFslv2.length > 0 || candidatesFsl.length > 0 || candidates10g.length > 0;
-                    if (hasVcloudServers) {
-                        candidates = [...candidatesFslv2, ...candidatesFsl, ...candidates10g];
-                    } else {
-                        candidates = [...candidatesOther];
-                    }
-                    if (candidates.length === 0) {
-                        for (const host of hostsList) {
-                            candidates.push({ name: host.text || 'Direct Link', href: host.href });
-                        }
-                    }
-
-                    const primaryHost = hostsList[0] || {};
-                    let sanitizedTitle = generateCustomFileName(state, primaryHost);
-                    if (!sanitizedTitle) {
-                        sanitizedTitle = (state.resolutionHeading || state.title || 'Movie')
-                            .replace(/[:*?"<>|\\/]/g, '').trim();
-                        if (primaryHost.episode) sanitizedTitle = `${sanitizedTitle} ${primaryHost.episode}`;
-                    }
-
-                    let downloadSuccess = false;
-                    for (let ci = 0; ci < candidates.length; ci++) {
-                        const cand = candidates[ci];
-                        if (cand.name.toLowerCase().includes('10gbps') || cand.name.toLowerCase().includes('10 gbps')) {
-                            try {
-                                let resolved = await resolveFinalUrl(cand.href);
-                                if (resolved && resolved.includes('link=')) {
-                                    resolved = decodeURIComponent(resolved.split('link=')[1].split('&')[0]);
-                                }
-                                if (resolved && resolved !== cand.href) cand.href = resolved;
-                            } catch (e) {}
-                        }
-                        const downloadQuery = `${sanitizedTitle} = ${cand.href}`;
-                        try {
-                            await downloadCommandHandler(conn, mek, from, senderJid, downloadQuery, reply, controller.signal, activeDownloadRef, cand.name, true);
-                            downloadSuccess = true;
-                            break;
-                        } catch (err) {
-                            if (err.message === 'Aborted') throw err;
-                        }
-                    }
-
-                    if (downloadSuccess) {
-                        successCount++;
-                    } else {
-                        failCount++;
-                        await reply(`❌ Failed to download *${epLabel}*. Skipping...`);
-                    }
-                    state.activeDownload = null;
-                } catch (err) {
-                    if (err.message === 'Aborted') {
-                        await reply(`🛑 Bulk download aborted.`);
-                        return;
-                    }
-                    failCount++;
-                    await reply(`❌ Failed to download *${epLabel}*: ${err.message}`);
-                    state.activeDownload = null;
-                }
+        for (const idx of selectedIndices) {
+            const epLabel = epList[idx];
+            const episodeHosts = (state.episodesMap || {})[epLabel] || [];
+            if (episodeHosts.length > 0) {
+                await executeFallbackDownload(conn, mek, from, senderJid, state, episodeHosts, reply);
+            } else {
+                await reply(`⚠️ Skipping *${epLabel}* — no download hosts found.`);
             }
-
-            await reply(`✅ *Bulk download complete!*\n\n📦 Success: *${successCount}/${epList.length}*` + (failCount > 0 ? `\n❌ Failed: *${failCount}*` : ''));
-            delete pendingSearch[cleanSender];
-        } else {
-            // ── Single episode download ──
-            const selectedEpisode = epList[num - 1];
-            const episodeHosts = (state.episodesMap || {})[selectedEpisode] || [];
-
-            if (episodeHosts.length === 0) {
-                return reply(`❌ No download hosts found for this episode.`);
-            }
-
-            // Trigger fallback download pipeline with all mirror hosts for this episode
-            await executeFallbackDownload(conn, mek, from, senderJid, state, episodeHosts, reply);
         }
     }
 }
