@@ -62,19 +62,36 @@ async function oTgM(conn, targets, streamUrl, filename, size, detailPath, thumbn
         let caption = ETfO.MVDL_MOVIE_CAPTION(title, season, episode, size, config);
         const thumbBuffer = await getThumbnailBuffer(thumbnail || ETfO.IMG);
 
-        for (const target of targets) {
-            try {
-                await conn.sendMessage(target, {
-                    document: { url: tempFilePath },
-                    mimetype: response.headers["content-type"] || "video/mp4",
-                    fileName: filename,
-                    caption: caption,
-                    jpegThumbnail: thumbBuffer
-                }, { quoted: mek });
-            } catch (err) {
-                console.error("Send fail to " + target + ":", err.message);
+        const primaryTarget = targets[0];
+        const docMsg = {
+            document: { url: tempFilePath },
+            mimetype: response.headers["content-type"] || "video/mp4",
+            fileName: filename,
+            caption: caption,
+            jpegThumbnail: thumbBuffer
+        };
+
+        let sentMsg = null;
+        try {
+            sentMsg = await conn.sendMessage(primaryTarget, docMsg, { quoted: mek });
+        } catch (err) {
+            console.error("Send fail to " + primaryTarget + ":", err.message);
+        }
+
+        if (sentMsg && targets.length > 1) {
+            for (let i = 1; i < targets.length; i++) {
+                try {
+                    console.log("Forwarding to target " + (i + 1) + "/" + targets.length + ": " + targets[i]);
+                    if (typeof conn.forwardMessage === 'function') {
+                        await conn.forwardMessage(targets[i], sentMsg, { forceForward: true });
+                    } else if (conn.sendMessage) {
+                        await conn.sendMessage(targets[i], { forward: sentMsg });
+                    }
+                } catch (err) {
+                    console.error("Forward fail to " + targets[i] + ":", err.message);
+                }
+                await new Promise(resolve => setTimeout(resolve, 1000));
             }
-            await new Promise(resolve => setTimeout(resolve, 3000));
         }
 
         if (fs.existsSync(tempFilePath)) {

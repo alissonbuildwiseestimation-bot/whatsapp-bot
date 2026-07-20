@@ -8,7 +8,7 @@ let danieListenerInitialized = false;
 
 const ALLOWED_COMMANDS = [
     'sv', 'sr', 'sh',
-    'alive', 'config', 'setgroup', 'dlstatus', 'dlconfig', 'downloadstatus',
+    'alive', 'allow', 'disallow', 'addowner', 'delowner', 'addsudo', 'delsudo', 'owners', 'allowed', 'sudolist', 'config', 'setgroup', 'dlstatus', 'dlconfig', 'downloadstatus',
     'c', 'cancel', 'clearqueue', 'que', 'queue', 'q',
     'd', 'p',
     'jid', 'groupid'

