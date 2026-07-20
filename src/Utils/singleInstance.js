@@ -20,12 +20,12 @@ function killPreviousInstances() {
 
     console.log(`[SingleInstance] Initializing single-instance guard (PID: ${myPid}, Parent: ${parentPid})...`);
 
-    // 1. Terminate PID recorded in session/bot.pid if active and different from me and my parent
+    // 1. Gracefully terminate PID recorded in session/bot.pid if active and different from me and my parent
     if (fs.existsSync(pidFile)) {
         try {
             const oldPidStr = fs.readFileSync(pidFile, 'utf-8').trim();
             const oldPid = parseInt(oldPidStr, 10);
-            if (!isNaN(oldPid) && oldPid !== myPid && oldPid !== parentPid) {
+            if (!isNaN(oldPid) && oldPid > 0 && oldPid !== myPid && oldPid !== parentPid && oldPid !== process.ppid) {
                 let isRunning = false;
                 try {
                     process.kill(oldPid, 0);
@@ -37,7 +37,7 @@ function killPreviousInstances() {
                 if (isRunning) {
                     console.log(`[SingleInstance] Found previous running bot process (PID: ${oldPid}). Terminating...`);
                     try {
-                        process.kill(oldPid, 'SIGKILL');
+                        process.kill(oldPid, 'SIGTERM');
                     } catch (_) {}
 
                     if (process.platform === 'win32') {
@@ -52,37 +52,7 @@ function killPreviousInstances() {
         }
     }
 
-    // 2. Safely release occupied Port 3000 if occupied by a different process
-    const targetPort = process.env.PORT || '3000';
-    if (process.platform === 'win32') {
-        try {
-            const portPsScript = [
-                `$portPids = Get-NetTCPConnection -LocalPort ${targetPort} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess;`,
-                `foreach ($pid in $portPids) {`,
-                `  if ($pid -ne ${myPid} -and $pid -ne ${parentPid || 0} -and $pid -gt 0) {`,
-                `    Write-Host "Releasing port ${targetPort} held by PID: $pid";`,
-                `    Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue;`,
-                `  }`,
-                `}`
-            ].join(' ');
-            execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${portPsScript}"`, { stdio: 'ignore' });
-        } catch (_) {}
-    } else {
-        try {
-            const portPidStr = execSync(`lsof -t -i:${targetPort} || true`, { encoding: 'utf-8' }).trim();
-            if (portPidStr) {
-                const pids = portPidStr.split(/\s+/).map(p => parseInt(p, 10)).filter(Boolean);
-                for (const p of pids) {
-                    if (p > 0 && p !== myPid && p !== parentPid && p !== process.ppid) {
-                        console.log(`[SingleInstance] Releasing port ${targetPort} held by PID: ${p}`);
-                        try { process.kill(p, 'SIGKILL'); } catch (_) {}
-                    }
-                }
-            }
-        } catch (_) {}
-    }
-
-    // 3. Write current PID to lockfile
+    // 2. Write current PID to lockfile
     try {
         fs.writeFileSync(pidFile, String(myPid), 'utf-8');
     } catch (e) {
