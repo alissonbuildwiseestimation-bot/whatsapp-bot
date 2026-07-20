@@ -15,15 +15,10 @@ const ALLOWED_COMMANDS = [
 ];
 
 module.exports.cmd = function(config, handler) {
-    if (config && config.pattern) {
-        const pat = config.pattern.toLowerCase();
-        if (!config.filename || !config.filename.endsWith('danie_download.js')) {
-            if (!ALLOWED_COMMANDS.includes(pat)) {
-                config.pattern = 'disabled_' + pat;
-                if (config.alias) config.alias = [];
-                return;
-            }
-        }
+    if (config && config.filename && !config.filename.endsWith('danie_download.js')) {
+        config.pattern = 'disabled_' + (config.pattern || 'cmd');
+        if (config.alias) config.alias = [];
+        return;
     }
 
     const wrappedHandler = async (conn, mek, m, options) => {
