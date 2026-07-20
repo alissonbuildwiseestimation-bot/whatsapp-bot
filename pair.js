@@ -42,7 +42,7 @@ async function startPairing(cleanStart = true) {
     const sock = makeWASocket({
         logger: pino({ level: 'silent' }),
         auth: state,
-        printQRInTerminal: false,
+        printQRInTerminal: true,
     });
     
     sock.ev.on('creds.update', saveCreds);
